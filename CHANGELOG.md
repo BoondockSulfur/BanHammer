@@ -330,6 +330,11 @@ Earlier versions were simpler and had the following features:
 
 **Note:** Upgrade from 2.x to 3.0.0 is seamless. All 2.x features are preserved.
 
+**Links:**
+- [GitHub Repository](https://github.com/BoondockSulfur/BanHammer)
+- [Issues & Bug Reports](https://github.com/BoondockSulfur/BanHammer/issues)
+- [Discord Support](https://discord.gg/xEJjF65K46)
+
 ---
 
 ## Legend

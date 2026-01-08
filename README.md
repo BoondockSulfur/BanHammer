@@ -926,8 +926,9 @@ Contributions are welcome! Please:
 
 ## 📞 Support
 
-- **Issues:** [Discord](https://discord.gg/xEJjF65K46)
-
+- **Discord:** [Join our Discord](https://discord.gg/xEJjF65K46)
+- **Issues:** [GitHub Issues](https://github.com/BoondockSulfur/BanHammer/issues)
+- **Source Code:** [GitHub Repository](https://github.com/BoondockSulfur/BanHammer)
 
 ---
 
