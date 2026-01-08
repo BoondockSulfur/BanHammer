@@ -1,0 +1,361 @@
+# =========================================
+# BanHammer 3.0.0 - Enhanced Configuration
+# =========================================
+# This is the complete configuration file with ALL features.
+# Copy sections you want to use into config.yml
+
+# ===== ITEM CONFIGURATION =====
+item:
+  material: CARROT_ON_A_STICK
+  name: "<gold>Ban Hammer</gold>"
+  lore:
+    - "<gray>Der legendäre Hammer der Admins</gray>"
+    - "<gray>Benutze ihn mit Bedacht.</gray>"
+  customModelData: 812345
+  unbreakable: true
+  hideFlags: true
+  giveOnJoin: false
+
+# ===== BASIC PUNISHMENT SETTINGS =====
+ban:
+  enabled: true
+  mode: BAN  # BAN = real ban; KICK = kick only
+  reason: "Du wurdest vom BanHammer getroffen."
+  duration: "permanent"  # permanent, 7d, 1h30m, PT24H
+  broadcast: true
+
+kick:
+  enabled: true
+  reason: "Du wurdest gekickt!"
+
+cooldownSeconds: 3
+
+# ===== VISUAL EFFECTS =====
+effects:
+  lightning: true
+  sound: true
+  particles: true
+  knockback:
+    enabled: false
+    horizontal: 0.8
+    vertical: 0.35
+
+# ===== RESOURCE PACK =====
+resourcePack:
+  enabled: true
+  url: ""
+  hash: ""
+  prompt: "Dieses Pack liefert die BanHammer-Textur. Akzeptieren?"
+  force: false
+  sendOnJoin: true
+  delayTicks: 40
+
+# ===== DATABASE CONFIGURATION =====
+database:
+  # Enable database tracking of all punishments
+  # When disabled, only Minecraft's built-in ban system is used
+  enabled: true
+
+  # Database type: SQLITE or MYSQL
+  type: SQLITE
+
+  # SQLite settings (only used if type=SQLITE)
+  sqlite:
+    file: "banhammer.db"
+
+  # MySQL settings (only used if type=MYSQL)
+  mysql:
+    host: "localhost"
+    port: 3306
+    database: "banhammer"
+    username: "root"
+    password: "password"
+
+  # Server name (useful for multi-server networks)
+  serverName: "Lobby"
+
+# ===== IP BANNING =====
+ipBan:
+  # Enable IP banning in addition to player banning
+  enabled: false
+
+  # Also ban IP when using ban hammer
+  autoIpBan: false
+
+  # Track IP addresses in database
+  trackIps: true
+
+# ===== TEMPORARY BANS & AUTO-UNBAN =====
+tempBans:
+  # Enable automatic unbanning when temp ban expires
+  enabled: true
+
+  # How often to check for expired bans (in seconds)
+  checkInterval: 60
+
+  # Notify player when their ban expires (if online)
+  notifyOnExpire: true
+
+# ===== EXTENDED PUNISHMENT TYPES =====
+punishmentTypes:
+  # Enable mute functionality
+  mute:
+    enabled: false
+    defaultDuration: "1h"
+    preventChat: true
+    preventCommands: true
+    allowedCommands:
+      - "/msg"
+      - "/reply"
+      - "/r"
+
+  # Enable jail functionality
+  jail:
+    enabled: false
+    location: # Set via command /bh setjail
+      world: "world"
+      x: 0
+      y: 64
+      z: 0
+    preventTeleport: true
+    preventDamage: true
+    checkInterval: 20  # ticks
+
+  # Enable region-specific bans
+  regionBan:
+    enabled: false
+    requireWorldGuard: true
+    defaultRegion: "spawn"
+
+  # Enable warning system
+  warnings:
+    enabled: false
+    # Auto-ban after X warnings
+    autoBanThreshold: 3
+    autoBanDuration: "7d"
+
+# ===== DISCORD INTEGRATION =====
+discord:
+  enabled: false
+  webhookUrl: "https://discord.com/api/webhooks/..."
+
+  # What to send to Discord
+  notifications:
+    bans: true
+    kicks: true
+    mutes: true
+    warnings: true
+    unbans: true
+    appeals: true
+
+  # Include staff name in webhooks
+  showStaffName: true
+
+  # Include server name in webhooks
+  showServerName: true
+
+# ===== REST API =====
+api:
+  enabled: false
+  port: 8080
+  host: "0.0.0.0"
+
+  # API authentication token
+  token: "your-secret-token-here"
+
+  # Enable CORS
+  cors: true
+  allowedOrigins:
+    - "https://yourwebsite.com"
+
+  # Rate limiting
+  rateLimit:
+    enabled: true
+    requestsPerMinute: 60
+
+  # Available endpoints when enabled:
+  # GET  /api/v1/punishments/{id}
+  # GET  /api/v1/punishments/player/{uuid}
+  # GET  /api/v1/punishments/active
+  # GET  /api/v1/statistics/staff
+  # GET  /api/v1/appeals/pending
+  # POST /api/v1/appeals/{id}/review
+
+# ===== BAN APPEALS SYSTEM =====
+appeals:
+  enabled: false
+
+  # Allow players to appeal in-game
+  allowIngame: true
+
+  # Command to submit appeal
+  command: "appeal"
+
+  # Cooldown between appeals (in hours)
+  cooldown: 24
+
+  # Maximum appeals per punishment
+  maxAppealsPerPunishment: 3
+
+  # Notify staff when new appeal is submitted
+  notifyStaff: true
+
+  # Auto-deny appeals after X days
+  autoDenyAfterDays: 30
+
+# ===== STATISTICS =====
+statistics:
+  enabled: false
+
+  # Track punishment statistics
+  trackStats: true
+
+  # Enable leaderboards
+  leaderboards:
+    enabled: true
+    updateInterval: 300  # seconds
+
+    # Show in GUI
+    showInGui: true
+
+# ===== GUI SYSTEM =====
+gui:
+  enabled: false
+
+  # Enable ban history GUI
+  history:
+    enabled: true
+    itemsPerPage: 36
+    orderBy: "newest"  # newest, oldest
+
+  # Enable appeals GUI
+  appeals:
+    enabled: true
+    showPending: true
+    showReviewed: true
+
+  # Enable statistics GUI
+  stats:
+    enabled: true
+    showTop: 10
+
+# ===== MULTI-LANGUAGE SUPPORT =====
+language:
+  # Language file to use (messages_en.yml, messages_de.yml, etc.)
+  default: "de"
+
+  # Allow players to choose their language
+  perPlayerLanguage: false
+
+  # Available languages
+  available:
+    - "de"
+    - "en"
+    - "es"
+    - "fr"
+
+# ===== IMPORT/EXPORT =====
+importExport:
+  # Enable import from other ban plugins
+  enableImport: false
+
+  # Supported plugins: LiteBans, AdvancedBan, BanManager
+  importFrom: "LiteBans"
+
+  # Enable backup/export functionality
+  enableExport: true
+
+  # Auto-backup interval (in hours, 0 = disabled)
+  autoBackupInterval: 24
+
+  # Backup format: JSON or CSV
+  backupFormat: "JSON"
+
+# ===== LOGGING =====
+logging:
+  # Enable separate punishment log file
+  separateFile: true
+
+  # Log file name
+  fileName: "banhammer-punishments.log"
+
+  # Log level: INFO, DEBUG, WARN, ERROR
+  level: "INFO"
+
+  # Include in log:
+  logBans: true
+  logKicks: true
+  logMutes: true
+  logUnbans: true
+  logAppeals: true
+  logCommands: true
+
+  # Detailed logging
+  logIpAddresses: false
+  logPlayerUuids: true
+
+# ===== INPUT VALIDATION =====
+validation:
+  # Maximum length for ban reasons
+  maxReasonLength: 500
+
+  # Minimum reason length (0 = no minimum)
+  minReasonLength: 0
+
+  # Require reason for bans
+  requireReason: false
+
+  # Block offensive words in reasons
+  filterReasons: false
+  blockedWords:
+    - "example"
+
+# ===== HOOKS & INTEGRATIONS =====
+hooks:
+  # LuckPerms integration
+  luckPerms:
+    enabled: false
+    syncPermissions: true
+
+  # PlaceholderAPI support
+  placeholderAPI:
+    enabled: false
+
+  # Vault integration
+  vault:
+    enabled: false
+
+# ===== ADVANCED SETTINGS =====
+advanced:
+  # Debug mode
+  debug: false
+
+  # Async database operations
+  asyncDatabase: true
+
+  # Cache punishment data
+  caching:
+    enabled: true
+    duration: 300  # seconds
+
+  # Performance settings
+  performance:
+    maxConcurrentQueries: 10
+    queryTimeout: 30  # seconds
+
+# ===== EXPERIMENTAL FEATURES =====
+experimental:
+  # These features are experimental and may not work correctly!
+
+  # Machine learning for detecting ban evasion
+  mlBanEvasion: false
+
+  # Automatic punishment suggestions based on offense history
+  autoSuggest: false
+
+  # Cross-server punishment sync (requires Redis)
+  crossServerSync: false
+  redis:
+    host: "localhost"
+    port: 6379
+    password: ""

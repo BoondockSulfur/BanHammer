@@ -1,0 +1,79 @@
+name: BanHammer
+main: dev.banhammer.plugin.BanHammerPlugin
+version: 3.0.0
+api-version: '1.21'
+load: POSTWORLD
+softdepend: [Essentials]
+
+commands:
+  banhammer:
+    description: Admin ban hammer
+    usage: /banhammer [give|reload|pack|history|unban|stats|appeals|approve|deny|gui]
+    permission: banhammer.command
+    aliases: [bh]
+  appeal:
+    description: Submit a ban appeal
+    usage: /appeal <text>
+    permission: banhammer.appeal
+  mute:
+    description: Mute a player
+    usage: /mute <player> <duration> [reason]
+    permission: banhammer.mute
+  unmute:
+    description: Unmute a player
+    usage: /unmute <player> [reason]
+    permission: banhammer.mute
+  jail:
+    description: Jail a player
+    usage: /jail <player> <duration> [reason]
+    permission: banhammer.jail
+  unjail:
+    description: Release a player from jail
+    usage: /unjail <player> [reason]
+    permission: banhammer.jail
+  warn:
+    description: Warn a player
+    usage: /warn <player> <reason>
+    permission: banhammer.warn
+  setjail:
+    description: Set the jail location
+    usage: /setjail
+    permission: banhammer.setjail
+
+permissions:
+  banhammer.command:
+    default: op
+  banhammer.use:
+    default: op
+  banhammer.give:
+    default: op
+  banhammer.reload:
+    default: op
+  banhammer.bypass:
+    default: op
+  banhammer.history:
+    default: op
+  banhammer.history.others:
+    default: op
+  banhammer.unban:
+    default: op
+  banhammer.stats:
+    default: op
+  banhammer.appeals:
+    default: op
+  banhammer.appeals.review:
+    default: op
+  banhammer.appeal:
+    default: true
+  banhammer.ipban:
+    default: op
+  banhammer.mute:
+    default: op
+  banhammer.jail:
+    default: op
+  banhammer.warn:
+    default: op
+  banhammer.setjail:
+    default: op
+  banhammer.updatenotify:
+    default: op

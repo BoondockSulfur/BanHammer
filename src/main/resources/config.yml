@@ -1,0 +1,318 @@
+# =========================================
+# BanHammer 3.0.0 Configuration
+# =========================================
+# For advanced options see config-enhanced.yml
+
+# ===== ITEM SETTINGS =====
+item:
+  material: CARROT_ON_A_STICK
+  name: "<gold>Ban Hammer</gold>"
+  lore:
+    - "<gray>The legendary hammer of admins</gray>"
+    - "<gray>Use it wisely.</gray>"
+  customModelData: 812345
+  unbreakable: true
+  hideFlags: true
+  giveOnJoin: false
+
+# ===== BAN SETTINGS =====
+ban:
+  enabled: true
+  # BAN = actual ban; KICK = only kick with message
+  mode: BAN
+  reason: "You were struck by the BanHammer."
+  # Duration: "permanent", "7d", "1h30m", "PT24H"
+  duration: "permanent"
+  broadcast: true
+
+# ===== KICK SETTINGS =====
+kick:
+  enabled: true
+  reason: "You were kicked!"
+
+# ===== LANGUAGE =====
+# Supported languages: de (German), en (English)
+# The plugin will load messages_<language>.yml
+language: "en"
+
+# ===== COOLDOWN =====
+cooldownSeconds: 3
+
+# ===== EFFECTS =====
+effects:
+  lightning: true
+  sound: true
+  particles: true
+  knockback:
+    enabled: false
+    horizontal: 0.8
+    vertical: 0.35
+
+# ===== RESOURCE PACK =====
+resourcePack:
+  enabled: true
+  url: "https://github.com/ELITEK3V/Ban-Hammer-Pack-/raw/refs/heads/main/an_Hammer1.21.x.zip"
+  hash: "c8aeaa1bb7af7090c068368d7ee8393f82c2a501"
+  prompt: "This pack provides the BanHammer texture. Accept?"
+  force: false
+  sendOnJoin: true
+  delayTicks: 40
+
+# ===== DATABASE (NEW in 3.0) =====
+# Enables ban history tracking, statistics, and more
+database:
+  # Set to true to enable database features
+  enabled: false
+
+  # Database type: SQLITE or MYSQL
+  type: SQLITE
+
+  # SQLite settings (used when type=SQLITE)
+  sqlite:
+    file: "banhammer.db"
+
+  # MySQL settings (used when type=MYSQL)
+  mysql:
+    host: "localhost"
+    port: 3306
+    database: "banhammer"
+    username: "root"
+    password: "password"
+
+  # Server name (useful for multi-server networks)
+  serverName: "Server"
+
+# ===== TEMPORARY BANS & AUTO-UNBAN (NEW in 3.0) =====
+# Automatically removes expired temporary bans
+tempBans:
+  enabled: true
+  # How often to check for expired bans (in seconds)
+  checkInterval: 60
+  # Notify player when ban expires (if online)
+  notifyOnExpire: true
+
+# ===== IP BANNING (NEW in 3.0) =====
+ipBan:
+  # Enable IP banning features
+  enabled: false
+  # Automatically IP ban when using hammer
+  autoIpBan: false
+  # Track IP addresses in database
+  trackIps: true
+
+# ===== DISCORD INTEGRATION (NEW in 3.0) =====
+discord:
+  enabled: false
+  webhookUrl: ""
+
+  # What to send to Discord
+  notifications:
+    bans: true
+    kicks: true
+    unbans: true
+    mutes: true
+    jails: true
+    warnings: true
+    appeals: true
+
+  # Include details in webhooks
+  showStaffName: true
+  showServerName: true
+
+# ===== VALIDATION (NEW in 3.0) =====
+validation:
+  # Maximum length for ban reasons
+  maxReasonLength: 500
+  # Require a reason for bans
+  requireReason: false
+  # Filter offensive words
+  filterReasons: false
+  blockedWords: []
+
+# ===== LOGGING (NEW in 3.0) =====
+logging:
+  # Create separate log file for punishments
+  separateFile: false
+  fileName: "banhammer-punishments.log"
+  level: "INFO"
+
+  # What to log
+  logBans: true
+  logKicks: true
+  logUnbans: true
+
+# ===== APPEALS (NEW in 3.0) =====
+appeals:
+  # Enable appeal system
+  enabled: true
+  # Minimum text length for appeals
+  minLength: 20
+  # Cooldown between appeals (in hours)
+  cooldown: 24
+  # Maximum appeals per punishment
+  maxAppealsPerPunishment: 3
+  # Notify online staff when appeal is submitted
+  notifyStaff: true
+
+# ===== PUNISHMENT TYPES (NEW in 3.0) =====
+punishmentTypes:
+  # Mute System
+  mute:
+    enabled: true
+    defaultDuration: "1h"
+    defaultReason: "Spam/Insult"
+    preventChat: true
+    preventCommands: true
+    # Commands that are blocked while muted
+    blockedCommands:
+      - "msg"
+      - "tell"
+      - "w"
+      - "r"
+      - "me"
+      - "say"
+
+  # Jail System
+  jail:
+    enabled: true
+    defaultDuration: "30m"
+    defaultReason: "Rule violation"
+    preventMovement: true
+    preventTeleport: true
+    preventDamage: true
+    preventCommands: false
+    maxDistance: 10.0
+    # Jail location will be set with /setjail
+    location:
+      world: "world"
+      x: 0.0
+      y: 64.0
+      z: 0.0
+      yaw: 0.0
+      pitch: 0.0
+
+  # Warning System
+  warnings:
+    enabled: true
+    # Auto-ban after X warnings
+    autoBanThreshold: 3
+    # Duration of auto-ban
+    autoBanDuration: "7d"
+
+# ===== BAN PRESETS (NEW in 3.0) =====
+# Define custom ban presets that can be cycled through with Shift+Rightclick
+# Players can switch between presets and execute bans with the selected preset
+presets:
+  # Quick temporary ban
+  temp_1h:
+    displayName: "1 Hour Ban"
+    reason: "Temporary ban - 1 hour"
+    duration: "1h"
+    ipBan: false
+    sound: "BLOCK_NOTE_BLOCK_PLING"
+
+  temp_1d:
+    displayName: "1 Day Ban"
+    reason: "Temporary ban - 1 day"
+    duration: "1d"
+    ipBan: false
+    sound: "BLOCK_NOTE_BLOCK_PLING"
+
+  temp_7d:
+    displayName: "7 Days Ban"
+    reason: "Temporary ban - 7 days"
+    duration: "7d"
+    ipBan: false
+    sound: "BLOCK_NOTE_BLOCK_PLING"
+
+  permanent:
+    displayName: "Permanent Ban"
+    reason: "Permanently banned"
+    duration: "permanent"
+    ipBan: false
+    sound: "BLOCK_NOTE_BLOCK_BASS"
+
+  permanent_ip:
+    displayName: "Permanent IP-Ban"
+    reason: "Permanently IP-banned"
+    duration: "permanent"
+    ipBan: true
+    sound: "BLOCK_ANVIL_LAND"
+
+# Cooldown for switching presets (in milliseconds)
+presetSwitchCooldown: 250
+
+# ===== KICK/JAIL PRESETS (NEW in 3.0) =====
+# Define custom kick/jail presets that can be cycled through with Shift+Leftclick
+# Players can switch between presets and execute kicks or jails with the selected preset
+# Duration null/not set = Kick, Duration set = Jail
+kickJailPresets:
+  # Quick kick
+  quick_kick:
+    displayName: "Quick Kick"
+    reason: "Kicked from server"
+    # No duration = kick
+    sound: "BLOCK_NOTE_BLOCK_PLING"
+
+  # Warning kick
+  warning_kick:
+    displayName: "Warning Kick"
+    reason: "Warning - kicked from server"
+    sound: "BLOCK_NOTE_BLOCK_PLING"
+
+  # 10 minute jail
+  jail_10m:
+    displayName: "10 Min Jail"
+    reason: "Jailed for 10 minutes"
+    duration: "10m"
+    sound: "BLOCK_NOTE_BLOCK_BASS"
+
+  # 30 minute jail
+  jail_30m:
+    displayName: "30 Min Jail"
+    reason: "Jailed for 30 minutes"
+    duration: "30m"
+    sound: "BLOCK_NOTE_BLOCK_BASS"
+
+  # 1 hour jail
+  jail_1h:
+    displayName: "1 Hour Jail"
+    reason: "Jailed for 1 hour"
+    duration: "1h"
+    sound: "BLOCK_ANVIL_LAND"
+
+# ===== PRIVACY & GDPR (NEW in 3.0) =====
+privacy:
+  # IP address anonymization for GDPR compliance
+  # Options:
+  #   NONE    - Store full IP (⚠️ requires user consent!)
+  #   PARTIAL - Remove last octet (e.g., 192.168.1.0)
+  #   HASH    - One-way hash (allows identification, not reversal)
+  #   FULL    - Complete masking (***)
+  ipAnonymization: "PARTIAL"
+
+  # Salt for IP hashing (only used if ipAnonymization is HASH)
+  # IMPORTANT: Change this to a unique value and keep it secret!
+  ipHashSalt: "change-me-to-random-salt"
+
+  # Data retention
+  dataRetention:
+    enabled: false
+    # Auto-delete punishments older than X days
+    deleteAfterDays: 365
+    # Keep active punishments regardless of age
+    keepActivePunishments: true
+
+# ===== UPDATE CHECKER (NEW in 3.0) =====
+# Automatically check for updates on Modrinth
+updateChecker:
+  # Enable update checking
+  enabled: true
+  # Check for updates on server startup
+  checkOnStartup: true
+  # Notify admins with banhammer.updatenotify permission
+  notifyAdmins: true
+  # Check interval in hours (0 = only on startup)
+  checkInterval: 6
+  # Modrinth project ID
+  modrinthProjectId: "bs-banhammer"

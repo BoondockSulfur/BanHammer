@@ -1,0 +1,26 @@
+package dev.banhammer.plugin.util;
+
+public final class Hex {
+    private Hex() {}
+
+    public static byte[] decodeHex(String hex) {
+        String s = hex.trim();
+        if (s.startsWith("0x") || s.startsWith("0X")) s = s.substring(2);
+        if ((s.length() & 1) == 1) throw new IllegalArgumentException("Odd length hex");
+        int len = s.length() / 2;
+        byte[] out = new byte[len];
+        for (int i = 0; i < len; i++) {
+            int hi = toNibble(s.charAt(i * 2));
+            int lo = toNibble(s.charAt(i * 2 + 1));
+            out[i] = (byte) ((hi << 4) | lo);
+        }
+        return out;
+    }
+
+    private static int toNibble(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        throw new IllegalArgumentException("Invalid hex char: " + c);
+    }
+}
