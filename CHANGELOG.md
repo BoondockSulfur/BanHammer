@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.0.1] - 2026-04-18
+
+### 🐛 Bug Fixes
+
+#### Critical
+- **Unjail Teleport nicht funktioniert:** Spieler wurden beim Release aus dem Jail nicht an ihren ursprünglichen Ort zurückteleportiert
+  - **Ursache:** JailListener hat den Release-Teleport gecancelt, weil der Spieler noch im Jail-Cache war
+  - **Fix:** Cache-Entfernung erfolgt jetzt VOR dem Teleport in `JailManager.releasePlayer()`
+  - Gilt sowohl für `/unjail` Befehl als auch automatischen Ablauf
+
+- **SimpleDateFormat nicht thread-safe:** `BanHammerCommand` nutzte statisches `SimpleDateFormat` aus async CompletableFuture-Callbacks
+  - **Fix:** Ersetzt durch thread-sicheren `DateTimeFormatter`
+
+- **loadActiveMutes() doppelte DB-Queries:** `CompletableFuture.allOf()` wurde aufgerufen und ignoriert, dann die gleichen 2 Queries nochmal einzeln
+  - **Fix:** Sinnlosen allOf-Block entfernt (4 Queries → 2)
+
+- **Discord Shutdown Hook Leak:** Bei jedem `/bh reload` wurde ein neuer `Runtime.addShutdownHook()` registriert ohne den alten zu entfernen
+  - **Fix:** Hook-Referenz wird gespeichert und bei `shutdown()` entfernt
+
+#### High Priority
+- **getDatabase() NullPointerException:** `handleAppeals()` und `reviewAppeal()` riefen `plugin.getDatabase()` ohne Null-Check auf
+  - **Fix:** Null-Checks vor allen direkten `getDatabase()`-Aufrufen in BanHammerCommand
+
+- **unbanPlayer() findet nur BAN-Typ:** Temp-Bans und IP-Bans konnten per `/bh unban` nicht entfernt werden
+  - **Fix:** Sucht jetzt nach allen Ban-Typen (BAN, TEMP_BAN, IP_BAN) und entfernt auch IP-Bans aus der IP-Banliste
+
+- **unmutePlayer() findet nur MUTE-Typ:** Temp-Mutes konnten per `/unmute` nicht entfernt werden
+  - **Fix:** Sucht jetzt nach allen Mute-Typen (MUTE, TEMP_MUTE)
+
+- **IPv6-Validation immer true:** `isValidIP()` in UnbanScheduler gab für jede IPv6-Adresse true zurück, auch gehashte IPs
+  - **Fix:** Gehashte IPs werden erkannt (kein `.`/`:` → sofort false)
+
+- **HttpURLConnection Leak:** ModrinthUpdateChecker hat `connection.disconnect()` nie aufgerufen
+  - **Fix:** `disconnect()` im finally-Block; zusätzlich Null-Checks für JSON-Response-Felder
+
+#### Medium Priority
+- **PunishmentManager Race Condition:** Manager wurde mit null-Database erstellt und bei DB-Init komplett neu erstellt — Listener behielten alte Referenz
+  - **Fix:** DB/Discord-Referenzen sind jetzt `volatile` und updatebar via `updateDatabase()`/`updateDiscord()`
+
+- **Cooldown Maps Memory Leak:** `cooldowns`, `switchCooldowns`, `switchKickJailCooldowns` in HammerListener wuchsen unbegrenzt
+  - **Fix:** Cleanup bei `PlayerQuitEvent`
+
+- **Auto-Unjail ohne Teleport:** UnbanScheduler nutzte `releasePlayerByUUID()` für abgelaufene Jails, was keinen Teleport zurück auslöst
+  - **Fix:** Online-Spieler werden jetzt per `releasePlayer()` (mit Teleport) auf dem Main-Thread freigelassen
+
+- **Essentials Jail Release ohne Rück-Teleport:** Bei Essentials-Release wurde der Spieler nicht zum Original-Ort zurückteleportiert
+  - **Fix:** Return-Location wird auch bei Essentials-Release verwendet
+
+### 🔧 Improvements
+- Modrinth API Response: Robustere JSON-Parsing mit Null-Checks für `version_number`, `url` und `files`
+- Doppelter `releasePlayer()`-Aufruf in `unjailPlayer()` entfernt (Caller ist verantwortlich)
+
+---
+
 ## [3.0.0] - 2026-01-08
 
 ### 🎉 Main Features
