@@ -8,6 +8,7 @@ import dev.banhammer.plugin.event.PlayerPunishEvent;
 import dev.banhammer.plugin.event.PlayerPunishedEvent;
 import dev.banhammer.plugin.event.PlayerUnpunishedEvent;
 import dev.banhammer.plugin.integration.DiscordWebhook;
+import dev.banhammer.plugin.util.DurationParser;
 import dev.banhammer.plugin.util.IPAnonymizer;
 import org.bukkit.BanList;
 import org.bukkit.Bukkit;
@@ -30,9 +31,9 @@ import java.util.concurrent.ConcurrentHashMap;
 public class PunishmentManager {
 
     private final BanHammerPlugin plugin;
-    private final Database database;
-    private final DiscordWebhook discord;
-    private final boolean databaseEnabled;
+    private volatile Database database;
+    private volatile DiscordWebhook discord;
+    private volatile boolean databaseEnabled;
     private final String serverName;
 
     // Cache for active mutes to prevent race conditions in async checks
@@ -44,6 +45,21 @@ public class PunishmentManager {
         this.discord = discord;
         this.databaseEnabled = plugin.getConfig().getBoolean("database.enabled", false);
         this.serverName = plugin.getConfig().getString("database.serverName", "Unknown");
+    }
+
+    /**
+     * Updates the database reference (called after async DB initialization).
+     */
+    public void updateDatabase(Database database) {
+        this.database = database;
+        this.databaseEnabled = (database != null);
+    }
+
+    /**
+     * Updates the Discord webhook reference (called on reload).
+     */
+    public void updateDiscord(DiscordWebhook discord) {
+        this.discord = discord;
     }
 
     /**
@@ -241,10 +257,23 @@ public class PunishmentManager {
             // Find active ban in database
             UUID playerUuid = Bukkit.getOfflinePlayer(playerName).getUniqueId();
 
-            return database.getActivePunishmentsByType(playerUuid, PunishmentType.BAN)
-                    .thenCompose(punishments -> {
-                        if (!punishments.isEmpty()) {
-                            PunishmentRecord record = punishments.get(0);
+            // Search for all ban types (BAN, TEMP_BAN, IP_BAN)
+            return database.getActivePunishments(playerUuid)
+                    .thenCompose(allPunishments -> {
+                        PunishmentRecord record = allPunishments.stream()
+                                .filter(p -> p.getType() == PunishmentType.BAN ||
+                                             p.getType() == PunishmentType.TEMP_BAN ||
+                                             p.getType() == PunishmentType.IP_BAN)
+                                .findFirst()
+                                .orElse(null);
+
+                        if (record != null) {
+                            // Also remove IP ban if applicable
+                            if (record.getType() == PunishmentType.IP_BAN && record.getVictimIp() != null) {
+                                BanList ipBanList = Bukkit.getBanList(BanList.Type.IP);
+                                ipBanList.pardon(record.getVictimIp());
+                            }
+
                             return database.deactivatePunishment(record.getId(), staff.getUniqueId(), reason)
                                     .thenRun(() -> {
                                         record.setActive(false);
@@ -383,10 +412,16 @@ public class PunishmentManager {
         if (databaseEnabled && database != null) {
             UUID playerUuid = Bukkit.getOfflinePlayer(playerName).getUniqueId();
 
-            return database.getActivePunishmentsByType(playerUuid, PunishmentType.MUTE)
-                    .thenCompose(punishments -> {
-                        if (!punishments.isEmpty()) {
-                            PunishmentRecord record = punishments.get(0);
+            // Search for all mute types (MUTE, TEMP_MUTE)
+            return database.getActivePunishments(playerUuid)
+                    .thenCompose(allPunishments -> {
+                        PunishmentRecord record = allPunishments.stream()
+                                .filter(p -> p.getType() == PunishmentType.MUTE ||
+                                             p.getType() == PunishmentType.TEMP_MUTE)
+                                .findFirst()
+                                .orElse(null);
+
+                        if (record != null) {
                             return database.deactivatePunishment(record.getId(), staff.getUniqueId(), reason)
                                     .thenRun(() -> {
                                         record.setActive(false);
@@ -498,14 +533,8 @@ public class PunishmentManager {
     public CompletableFuture<Void> unjailPlayer(Player staff, String playerName, String reason) {
         UUID playerUuid = Bukkit.getOfflinePlayer(playerName).getUniqueId();
 
-        // Release player from jail (works for both online and offline)
-        Player player = Bukkit.getPlayer(playerName);
-        if (player != null) {
-            plugin.getJailManager().releasePlayer(player);
-        } else {
-            // Player is offline, clean up jail tracking to prevent memory leak
-            plugin.getJailManager().releasePlayerByUUID(playerUuid);
-        }
+        // Note: Caller is responsible for calling JailManager.releasePlayer() before this method.
+        // This method only handles the database record and events.
 
         if (databaseEnabled && database != null) {
             return database.getActivePunishmentsByType(playerUuid, PunishmentType.JAIL)
@@ -628,68 +657,19 @@ public class PunishmentManager {
 
     /**
      * Parses a duration string (e.g., "7d", "1h30m", "PT24H").
+     * Uses the shared DurationParser utility.
      *
      * @param durationStr The duration string
      * @return The parsed Duration, or null if permanent/invalid
      */
     private Duration parseDuration(String durationStr) {
-        if (durationStr == null || durationStr.trim().isEmpty()) {
-            return null;
-        }
-
-        String s = durationStr.trim();
-
-        // Explicit handling for "permanent" keyword
-        if (s.equalsIgnoreCase("permanent") || s.equalsIgnoreCase("perm")) {
-            return null; // null = permanent
-        }
-
-        // Try ISO-8601 format (case-insensitive)
-        if (s.toUpperCase().startsWith("P")) {
-            try {
-                return Duration.parse(s.toUpperCase());
-            } catch (Exception e) {
-                plugin.getSLF4JLogger().warn("Invalid ISO-8601 duration format: {}", s);
-                // Fall through to custom parsing
+        Duration duration = DurationParser.parse(durationStr);
+        if (duration == null && durationStr != null && !durationStr.trim().isEmpty()) {
+            if (!durationStr.equalsIgnoreCase("permanent") && !durationStr.equalsIgnoreCase("perm")) {
+                plugin.getSLF4JLogger().warn("Could not parse duration: '{}'. Use format like '7d', '1h30m', or 'permanent'", durationStr);
             }
         }
-
-        // Custom format: "7d", "1h30m", "2d12h", etc.
-        String tmp = s.toLowerCase();
-        long days = extractTime(tmp, "d");
-        long hours = extractTime(tmp, "h");
-        long minutes = extractTime(tmp, "m");
-        long seconds = extractTime(tmp, "s");
-
-        // Check if any time unit was found
-        if (days == 0 && hours == 0 && minutes == 0 && seconds == 0) {
-            plugin.getSLF4JLogger().warn("Could not parse duration: '{}'. Use format like '7d', '1h30m', or 'permanent'", durationStr);
-            return null; // Invalid format, default to permanent
-        }
-
-        Duration duration = Duration.ZERO;
-        if (days > 0) duration = duration.plusDays(days);
-        if (hours > 0) duration = duration.plusHours(hours);
-        if (minutes > 0) duration = duration.plusMinutes(minutes);
-        if (seconds > 0) duration = duration.plusSeconds(seconds);
-
         return duration;
-    }
-
-    private long extractTime(String str, String unit) {
-        int index = str.toLowerCase().indexOf(unit);
-        if (index < 1) return 0; // Fixed: Changed from <= to < to handle position 0 correctly
-
-        int start = index - 1;
-        while (start >= 0 && Character.isDigit(str.charAt(start))) {
-            start--;
-        }
-
-        try {
-            return Long.parseLong(str.substring(start + 1, index));
-        } catch (NumberFormatException e) {
-            return 0;
-        }
     }
 
     /**
@@ -720,14 +700,6 @@ public class PunishmentManager {
         if (!databaseEnabled || database == null) {
             return;
         }
-
-        // Query for all active mutes from database
-        CompletableFuture.allOf(
-            database.getActivePunishmentsByTypeGlobal(PunishmentType.MUTE),
-            database.getActivePunishmentsByTypeGlobal(PunishmentType.TEMP_MUTE)
-        ).thenAccept(v -> {
-            // This will be handled by the individual futures below
-        });
 
         // Load permanent mutes
         database.getActivePunishmentsByTypeGlobal(PunishmentType.MUTE)

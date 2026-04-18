@@ -50,6 +50,13 @@ public class BanHammerPlugin extends JavaPlugin {
         // Save and load config
         saveDefaultConfig();
 
+        // Validate configuration
+        if (!dev.banhammer.plugin.util.ConfigValidator.validate(getConfig(), getSLF4JLogger())) {
+            getSLF4JLogger().error("Configuration validation failed! Plugin may not work correctly.");
+            getSLF4JLogger().error("Please fix the errors in config.yml and reload the plugin.");
+            // Don't disable plugin - let it run with warnings
+        }
+
         // Generate hash salt if needed
         generateHashSaltIfNeeded();
 
@@ -131,7 +138,7 @@ public class BanHammerPlugin extends JavaPlugin {
         Objects.requireNonNull(getCommand("mute")).setTabCompleter(punishCmd);
         Objects.requireNonNull(getCommand("jail")).setTabCompleter(punishCmd);
 
-        getSLF4JLogger().info("BanHammer v3.0.0 enabled successfully!");
+        getSLF4JLogger().info("BanHammer v3.0.1 enabled successfully!");
     }
 
     @Override
@@ -144,6 +151,11 @@ public class BanHammerPlugin extends JavaPlugin {
         // Stop scheduler
         if (unbanScheduler != null) {
             unbanScheduler.stop();
+        }
+
+        // Stop jail manager cleanup task
+        if (jailManager != null) {
+            jailManager.shutdown();
         }
 
         // Close database
@@ -185,12 +197,18 @@ public class BanHammerPlugin extends JavaPlugin {
             return;
         }
 
-        // Initialize database asynchronously
+        // Initialize database asynchronously with configurable timeout
+        long timeoutSeconds = getConfig().getLong("database.initializationTimeoutSeconds", 60);
         tempDatabase.initialize()
-            .orTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .orTimeout(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)
             .whenComplete((result, throwable) -> {
                 if (throwable != null) {
-                    getSLF4JLogger().error("Failed to initialize database", throwable);
+                    if (throwable instanceof java.util.concurrent.TimeoutException) {
+                        getSLF4JLogger().error("Database initialization timed out after {} seconds. " +
+                                "Try increasing 'database.initializationTimeoutSeconds' in config.", timeoutSeconds);
+                    } else {
+                        getSLF4JLogger().error("Failed to initialize database", throwable);
+                    }
                     database = null;
                 } else {
                     database = tempDatabase;
@@ -211,8 +229,8 @@ public class BanHammerPlugin extends JavaPlugin {
             return;
         }
 
-        // Initialize punishment manager (may have been initialized without DB, reinitialize with DB)
-        punishmentManager = new PunishmentManager(this, database, discord);
+        // Update punishment manager with database reference (instead of creating new instance)
+        punishmentManager.updateDatabase(database);
 
         // Load active mutes into cache
         punishmentManager.loadActiveMutes();
@@ -266,7 +284,7 @@ public class BanHammerPlugin extends JavaPlugin {
 
         // Update punishment manager with new Discord instance
         if (punishmentManager != null) {
-            punishmentManager = new PunishmentManager(this, database, discord);
+            punishmentManager.updateDiscord(discord);
             getSLF4JLogger().debug("PunishmentManager updated with new Discord webhook");
         }
     }
@@ -295,8 +313,8 @@ public class BanHammerPlugin extends JavaPlugin {
             database.shutdown().join();
             database = null;
 
-            // Reinitialize punishment manager without database
-            punishmentManager = new PunishmentManager(this, null, discord);
+            // Update punishment manager to remove database reference
+            punishmentManager.updateDatabase(null);
 
             getSLF4JLogger().info("Database disabled. Using vanilla ban system.");
         }
@@ -346,11 +364,19 @@ public class BanHammerPlugin extends JavaPlugin {
 
             String newSalt = generateRandomSalt(32);
             getConfig().set("privacy.ipHashSalt", newSalt);
-            saveConfig();
 
-            getSLF4JLogger().info("Generated unique IP hash salt for this server");
-            getSLF4JLogger().warn("⚠ WICHTIG: Dein Hash-Salt wurde automatisch generiert.");
-            getSLF4JLogger().warn("⚠ Lösche ihn NICHT aus der config.yml, sonst können IPs nicht mehr zugeordnet werden!");
+            // Improved error handling for config saving
+            try {
+                saveConfig();
+                getSLF4JLogger().info("Generated unique IP hash salt for this server");
+                getSLF4JLogger().warn("⚠ WICHTIG: Dein Hash-Salt wurde automatisch generiert.");
+                getSLF4JLogger().warn("⚠ Lösche ihn NICHT aus der config.yml, sonst können IPs nicht mehr zugeordnet werden!");
+            } catch (Exception e) {
+                getSLF4JLogger().error("Failed to save config with new hash salt! " +
+                        "Please ensure the plugin has write permissions to the config directory.", e);
+                getSLF4JLogger().error("⚠ IP anonymization may not work correctly until config is writable!");
+                // Don't fail plugin startup - use in-memory salt as fallback
+            }
         } else {
             // Salt exists and is valid
             getSLF4JLogger().info("Using existing IP hash salt (length: {})", currentSalt.length());

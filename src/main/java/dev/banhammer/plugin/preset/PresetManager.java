@@ -1,6 +1,7 @@
 package dev.banhammer.plugin.preset;
 
 import dev.banhammer.plugin.BanHammerPlugin;
+import dev.banhammer.plugin.util.DurationParser;
 import org.bukkit.configuration.ConfigurationSection;
 
 import java.time.Duration;
@@ -130,68 +131,19 @@ public class PresetManager {
 
     /**
      * Parses a duration string (e.g., "7d", "1h30m", "PT24H").
+     * Uses the shared DurationParser utility.
      *
      * @param durationStr The duration string
      * @return The parsed Duration, or null if permanent/invalid
      */
     private Duration parseDuration(String durationStr) {
-        if (durationStr == null || durationStr.trim().isEmpty()) {
-            return null;
-        }
-
-        String s = durationStr.trim();
-
-        // Explicit handling for "permanent" keyword
-        if (s.equalsIgnoreCase("permanent") || s.equalsIgnoreCase("perm")) {
-            return null; // null = permanent
-        }
-
-        // Try ISO-8601 format (case-insensitive)
-        if (s.toUpperCase().startsWith("P")) {
-            try {
-                return Duration.parse(s.toUpperCase());
-            } catch (Exception e) {
-                plugin.getSLF4JLogger().warn("Invalid ISO-8601 duration format: {}", s);
-                // Fall through to custom parsing
+        Duration duration = DurationParser.parse(durationStr);
+        if (duration == null && durationStr != null && !durationStr.trim().isEmpty()) {
+            if (!durationStr.equalsIgnoreCase("permanent") && !durationStr.equalsIgnoreCase("perm")) {
+                plugin.getSLF4JLogger().warn("Could not parse duration: '{}'. Use format like '7d', '1h30m', or 'permanent'", durationStr);
             }
         }
-
-        // Custom format: "7d", "1h30m", "2d12h", etc.
-        String tmp = s.toLowerCase();
-        long days = extractTime(tmp, "d");
-        long hours = extractTime(tmp, "h");
-        long minutes = extractTime(tmp, "m");
-        long seconds = extractTime(tmp, "s");
-
-        // Check if any time unit was found
-        if (days == 0 && hours == 0 && minutes == 0 && seconds == 0) {
-            plugin.getSLF4JLogger().warn("Could not parse duration: '{}'. Use format like '7d', '1h30m', or 'permanent'", durationStr);
-            return null; // Invalid format, default to permanent
-        }
-
-        Duration duration = Duration.ZERO;
-        if (days > 0) duration = duration.plusDays(days);
-        if (hours > 0) duration = duration.plusHours(hours);
-        if (minutes > 0) duration = duration.plusMinutes(minutes);
-        if (seconds > 0) duration = duration.plusSeconds(seconds);
-
         return duration;
-    }
-
-    private long extractTime(String str, String unit) {
-        int index = str.toLowerCase().indexOf(unit);
-        if (index < 1) return 0;
-
-        int start = index - 1;
-        while (start >= 0 && Character.isDigit(str.charAt(start))) {
-            start--;
-        }
-
-        try {
-            return Long.parseLong(str.substring(start + 1, index));
-        } catch (NumberFormatException e) {
-            return 0;
-        }
     }
 
     /* =========================

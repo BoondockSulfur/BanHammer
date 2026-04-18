@@ -7,6 +7,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.Player;
+import org.bukkit.scheduler.BukkitTask;
 
 import java.util.Map;
 import java.util.UUID;
@@ -24,11 +25,13 @@ public class JailManager {
     private final Map<UUID, Location> jailedPlayers = new ConcurrentHashMap<>();
     private final Map<UUID, Location> returnLocations = new ConcurrentHashMap<>();
     private Location jailLocation;
+    private BukkitTask cleanupTask;
 
     public JailManager(BanHammerPlugin plugin, EssentialsJailIntegration essentialsJail) {
         this.plugin = plugin;
         this.essentialsJail = essentialsJail;
         loadJailLocation();
+        startCleanupTask();
     }
 
     private void loadJailLocation() {
@@ -64,15 +67,25 @@ public class JailManager {
         // Try Essentials first if available
         if (essentialsJail != null && essentialsJail.isAvailable()) {
             plugin.getSLF4JLogger().debug("Attempting to jail {} using Essentials...", player.getName());
+
+            // FIXED: Save return location BEFORE jailing (for both Essentials and built-in)
+            returnLocations.put(player.getUniqueId(), player.getLocation().clone());
+
             boolean success = essentialsJail.jailPlayer(player);
 
             if (success) {
                 // Track player as jailed (for our own management)
                 jailedPlayers.put(player.getUniqueId(), player.getLocation());
+
+                // Add to JailListener cache for performance
+                notifyJailListenerCacheAdd(player.getUniqueId());
+
                 player.sendMessage(plugin.messages().jailed());
                 plugin.getSLF4JLogger().info("Jailed {} using Essentials", player.getName());
                 return true;
             } else {
+                // Rollback: Remove return location if jail failed
+                returnLocations.remove(player.getUniqueId());
                 plugin.getSLF4JLogger().warn("Essentials jail failed for {}, falling back to built-in jail", player.getName());
             }
         }
@@ -92,6 +105,9 @@ public class JailManager {
         player.teleport(jailLocation);
         jailedPlayers.put(player.getUniqueId(), jailLocation);
 
+        // Add to JailListener cache for performance
+        notifyJailListenerCacheAdd(player.getUniqueId());
+
         player.sendMessage(plugin.messages().jailed());
         return true;
     }
@@ -109,14 +125,24 @@ public class JailManager {
             return;
         }
 
+        // Remove from JailListener cache FIRST to prevent teleport cancellation
+        notifyJailListenerCacheRemove(uuid);
+
+        // Get return location before removing from maps
+        Location returnLoc = returnLocations.remove(uuid);
+        jailedPlayers.remove(uuid);
+
         // Try to release from Essentials if available and player is jailed there
         if (essentialsJail != null && essentialsJail.isAvailable() && essentialsJail.isJailed(player)) {
             plugin.getSLF4JLogger().debug("Releasing {} from Essentials jail...", player.getName());
             boolean success = essentialsJail.releasePlayer(player);
 
             if (success) {
-                jailedPlayers.remove(uuid);
-                returnLocations.remove(uuid);
+                // Teleport back to original location (Essentials doesn't do this)
+                if (returnLoc != null && returnLoc.getWorld() != null) {
+                    player.teleport(returnLoc);
+                }
+
                 player.sendMessage(plugin.messages().unjailed());
                 plugin.getSLF4JLogger().info("Released {} from Essentials jail", player.getName());
                 return;
@@ -125,13 +151,11 @@ public class JailManager {
             }
         }
 
-        // Handle built-in jail release
-        Location returnLoc = returnLocations.remove(uuid);
+        // Handle built-in jail release - teleport back to original location
         if (returnLoc != null && returnLoc.getWorld() != null) {
             player.teleport(returnLoc);
         }
 
-        jailedPlayers.remove(uuid);
         player.sendMessage(plugin.messages().unjailed());
     }
 
@@ -144,6 +168,9 @@ public class JailManager {
         // Remove from jail tracking
         jailedPlayers.remove(uuid);
         returnLocations.remove(uuid); // Fix memory leak - clean up return location
+
+        // Remove from JailListener cache
+        notifyJailListenerCacheRemove(uuid);
     }
 
     /**
@@ -251,6 +278,86 @@ public class JailManager {
                         });
                     });
             });
+        }
+    }
+
+    /**
+     * Notifies JailListener to add player to cache for performance optimization.
+     */
+    private void notifyJailListenerCacheAdd(UUID playerUuid) {
+        try {
+            // Get JailListener from the plugin's HandlerList
+            for (var listener : org.bukkit.event.HandlerList.getRegisteredListeners(plugin)) {
+                if (listener.getListener() instanceof dev.banhammer.plugin.listener.JailListener jailListener) {
+                    jailListener.addToCache(playerUuid);
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            plugin.getSLF4JLogger().debug("Could not update JailListener cache: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Notifies JailListener to remove player from cache.
+     */
+    private void notifyJailListenerCacheRemove(UUID playerUuid) {
+        try {
+            // Get JailListener from the plugin's HandlerList
+            for (var listener : org.bukkit.event.HandlerList.getRegisteredListeners(plugin)) {
+                if (listener.getListener() instanceof dev.banhammer.plugin.listener.JailListener jailListener) {
+                    jailListener.removeFromCache(playerUuid);
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            plugin.getSLF4JLogger().debug("Could not update JailListener cache: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Starts a periodic cleanup task to remove offline players from jail tracking.
+     * Prevents memory leaks from players who logged out while jailed.
+     */
+    private void startCleanupTask() {
+        // Run cleanup every 5 minutes (6000 ticks)
+        cleanupTask = Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
+            int removed = cleanupOfflineJails();
+            if (removed > 0) {
+                plugin.getSLF4JLogger().debug("Cleaned up {} offline jailed players from memory", removed);
+            }
+        }, 6000L, 6000L);
+    }
+
+    /**
+     * Cleans up offline players from jail tracking maps.
+     * Players who are offline don't need to be tracked in memory since
+     * their jail status persists in the database.
+     *
+     * @return Number of entries removed
+     */
+    public int cleanupOfflineJails() {
+        int removed = 0;
+
+        // Remove offline players from both maps
+        for (UUID uuid : jailedPlayers.keySet()) {
+            Player player = Bukkit.getPlayer(uuid);
+            if (player == null || !player.isOnline()) {
+                jailedPlayers.remove(uuid);
+                returnLocations.remove(uuid);
+                removed++;
+            }
+        }
+
+        return removed;
+    }
+
+    /**
+     * Stops the cleanup task (called on plugin disable).
+     */
+    public void shutdown() {
+        if (cleanupTask != null) {
+            cleanupTask.cancel();
         }
     }
 }

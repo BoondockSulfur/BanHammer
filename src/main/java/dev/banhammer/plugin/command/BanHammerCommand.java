@@ -1,6 +1,7 @@
 package dev.banhammer.plugin.command;
 
 import dev.banhammer.plugin.BanHammerPlugin;
+import dev.banhammer.plugin.database.Database;
 import dev.banhammer.plugin.database.model.AppealRecord;
 import dev.banhammer.plugin.database.model.PunishmentRecord;
 import dev.banhammer.plugin.database.model.PunishmentType;
@@ -15,8 +16,9 @@ import org.bukkit.command.TabExecutor;
 import org.bukkit.entity.Player;
 
 import java.lang.reflect.Method;
-import java.text.SimpleDateFormat;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -24,7 +26,8 @@ public class BanHammerCommand implements TabExecutor {
 
     private final BanHammerPlugin plugin;
     private static final int ENTRIES_PER_PAGE = 10;
-    private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("dd.MM.yyyy HH:mm");
+    private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")
+            .withZone(ZoneId.systemDefault());
 
     public BanHammerCommand(BanHammerPlugin plugin) { this.plugin = plugin; }
 
@@ -194,13 +197,13 @@ public class BanHammerCommand implements TabExecutor {
                         record.getReason()
                 ));
                 sender.sendMessage(plugin.messages().historyEntryDate(
-                        DATE_FORMAT.format(Date.from(record.getIssuedAt()))
+                        DATE_FORMAT.format(record.getIssuedAt())
                 ));
                 sender.sendMessage(plugin.messages().historyEntryStaff(record.getStaffName()));
 
                 if (record.getExpiresAt() != null) {
                     sender.sendMessage(plugin.messages().historyEntryExpires(
-                            DATE_FORMAT.format(Date.from(record.getExpiresAt()))
+                            DATE_FORMAT.format(record.getExpiresAt())
                     ));
                 }
 
@@ -307,7 +310,13 @@ public class BanHammerCommand implements TabExecutor {
             return;
         }
 
-        plugin.getDatabase().getPendingAppeals().thenAccept(appeals -> {
+        Database db = plugin.getDatabase();
+        if (db == null) {
+            sender.sendMessage(plugin.messages().databaseDisabled());
+            return;
+        }
+
+        db.getPendingAppeals().thenAccept(appeals -> {
             if (appeals.isEmpty()) {
                 sender.sendMessage(plugin.messages().appealsEmpty());
                 return;
@@ -326,7 +335,7 @@ public class BanHammerCommand implements TabExecutor {
                     shortText
                 ));
                 sender.sendMessage(plugin.messages().appealsEntryDate(
-                    DATE_FORMAT.format(Date.from(appeal.getSubmittedAt()))
+                    DATE_FORMAT.format(appeal.getSubmittedAt())
                 ));
             }
         }).exceptionally(ex -> {
@@ -423,7 +432,13 @@ public class BanHammerCommand implements TabExecutor {
     }
 
     private void reviewAppeal(Player staff, int appealId, AppealRecord.AppealStatus status, String response) {
-        plugin.getDatabase().getAppeal(appealId).thenAccept(appeal -> {
+        Database db = plugin.getDatabase();
+        if (db == null) {
+            staff.sendMessage(plugin.messages().databaseDisabled());
+            return;
+        }
+
+        db.getAppeal(appealId).thenAccept(appeal -> {
             if (appeal == null) {
                 staff.sendMessage(plugin.messages().appealsInvalidId());
                 return;
@@ -442,7 +457,7 @@ public class BanHammerCommand implements TabExecutor {
             appeal.setReviewResponse(response);
             appeal.setReviewedAt(Instant.now());
 
-            plugin.getDatabase().updateAppeal(appeal).thenRun(() -> {
+            db.updateAppeal(appeal).thenRun(() -> {
                 String statusText = status == AppealRecord.AppealStatus.APPROVED ? "APPROVED" : "DENIED";
 
                 if (status == AppealRecord.AppealStatus.APPROVED) {

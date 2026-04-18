@@ -21,6 +21,7 @@ public class DiscordWebhook {
     private final Logger logger;
     private final WebhookClient client;
     private final boolean enabled;
+    private final Thread shutdownHook;
 
     public DiscordWebhook(Logger logger, String webhookUrl, boolean enabled) {
         this.logger = logger;
@@ -28,6 +29,7 @@ public class DiscordWebhook {
         // Use temporary variables for validation logic
         WebhookClient tempClient = null;
         boolean tempEnabled = false;
+        Thread tempShutdownHook = null;
 
         // Validate webhook URL if enabled
         if (enabled) {
@@ -47,15 +49,14 @@ public class DiscordWebhook {
 
                     // Add shutdown hook to ensure cleanup even if plugin crashes
                     final WebhookClient finalClient = tempClient;
-                    Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                        if (finalClient != null) {
-                            try {
-                                finalClient.close();
-                            } catch (Exception e) {
-                                // Ignore exceptions during shutdown
-                            }
+                    tempShutdownHook = new Thread(() -> {
+                        try {
+                            finalClient.close();
+                        } catch (Exception e) {
+                            // Ignore exceptions during shutdown
                         }
-                    }));
+                    });
+                    Runtime.getRuntime().addShutdownHook(tempShutdownHook);
 
                     logger.info("✓ Discord webhook connected successfully!");
                 } catch (Exception e) {
@@ -68,6 +69,7 @@ public class DiscordWebhook {
         // Assign final fields once at the end
         this.client = tempClient;
         this.enabled = tempEnabled;
+        this.shutdownHook = tempShutdownHook;
     }
 
     /**
@@ -201,6 +203,14 @@ public class DiscordWebhook {
     }
 
     public void shutdown() {
+        // Remove shutdown hook to prevent leak on reload
+        if (shutdownHook != null) {
+            try {
+                Runtime.getRuntime().removeShutdownHook(shutdownHook);
+            } catch (IllegalStateException e) {
+                // JVM is already shutting down, ignore
+            }
+        }
         if (client != null) {
             client.close();
         }

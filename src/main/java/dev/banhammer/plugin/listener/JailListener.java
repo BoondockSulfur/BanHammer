@@ -11,8 +11,13 @@ import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
 
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
 /**
  * Enforces jail restrictions on jailed players.
+ * Performance-optimized with local cache for fast jail checks.
  *
  * @since 3.0.0
  */
@@ -20,26 +25,55 @@ public class JailListener implements Listener {
 
     private final BanHammerPlugin plugin;
 
+    // Performance optimization: Local cache for fast jail checks
+    // This prevents expensive Map lookups and Reflection calls on every movement
+    private final Set<UUID> jailedPlayersCache = ConcurrentHashMap.newKeySet();
+
     public JailListener(BanHammerPlugin plugin) {
         this.plugin = plugin;
+    }
+
+    /**
+     * Adds a player to the jailed cache (called by JailManager).
+     */
+    public void addToCache(UUID playerUuid) {
+        jailedPlayersCache.add(playerUuid);
+    }
+
+    /**
+     * Removes a player from the jailed cache (called by JailManager).
+     */
+    public void removeFromCache(UUID playerUuid) {
+        jailedPlayersCache.remove(playerUuid);
+    }
+
+    /**
+     * Clears the entire cache (for reload scenarios).
+     */
+    public void clearCache() {
+        jailedPlayersCache.clear();
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onMove(PlayerMoveEvent event) {
         Player player = event.getPlayer();
 
+        // Performance optimization: Early return if not in cache
+        // This prevents expensive Map lookups and Reflection calls
+        if (!jailedPlayersCache.contains(player.getUniqueId())) {
+            return;
+        }
+
         if (!plugin.getConfig().getBoolean("punishmentTypes.jail.preventMovement", true)) {
             return;
         }
 
-        if (plugin.getJailManager().isJailed(player.getUniqueId())) {
-            // Only check if player moved to different block
-            if (event.getFrom().getBlockX() != event.getTo().getBlockX() ||
-                event.getFrom().getBlockY() != event.getTo().getBlockY() ||
-                event.getFrom().getBlockZ() != event.getTo().getBlockZ()) {
+        // Only check if player moved to different block
+        if (event.getFrom().getBlockX() != event.getTo().getBlockX() ||
+            event.getFrom().getBlockY() != event.getTo().getBlockY() ||
+            event.getFrom().getBlockZ() != event.getTo().getBlockZ()) {
 
-                plugin.getJailManager().enforceJail(player);
-            }
+            plugin.getJailManager().enforceJail(player);
         }
     }
 
@@ -47,15 +81,18 @@ public class JailListener implements Listener {
     public void onTeleport(PlayerTeleportEvent event) {
         Player player = event.getPlayer();
 
+        // Performance optimization: Early return if not in cache
+        if (!jailedPlayersCache.contains(player.getUniqueId())) {
+            return;
+        }
+
         if (!plugin.getConfig().getBoolean("punishmentTypes.jail.preventTeleport", true)) {
             return;
         }
 
-        if (plugin.getJailManager().isJailed(player.getUniqueId())) {
-            // Block teleportation
-            event.setCancelled(true);
-            player.sendMessage(plugin.messages().jailNoTeleport());
-        }
+        // Block teleportation
+        event.setCancelled(true);
+        player.sendMessage(plugin.messages().jailNoTeleport());
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -64,36 +101,44 @@ public class JailListener implements Listener {
             return;
         }
 
+        // Performance optimization: Early return if not in cache
+        if (!jailedPlayersCache.contains(player.getUniqueId())) {
+            return;
+        }
+
         if (!plugin.getConfig().getBoolean("punishmentTypes.jail.preventDamage", true)) {
             return;
         }
 
-        if (plugin.getJailManager().isJailed(player.getUniqueId())) {
-            event.setCancelled(true);
-        }
+        event.setCancelled(true);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onCommand(PlayerCommandPreprocessEvent event) {
         Player player = event.getPlayer();
 
+        // Performance optimization: Early return if not in cache
+        if (!jailedPlayersCache.contains(player.getUniqueId())) {
+            return;
+        }
+
         if (!plugin.getConfig().getBoolean("punishmentTypes.jail.preventCommands", false)) {
             return;
         }
 
-        if (plugin.getJailManager().isJailed(player.getUniqueId())) {
-            String command = event.getMessage().split(" ")[0].toLowerCase();
+        String command = event.getMessage().split(" ")[0].toLowerCase();
 
-            // Allow certain commands
-            if (!command.equals("/appeal") && !command.equals("/help")) {
-                event.setCancelled(true);
-                player.sendMessage(plugin.messages().jailNoCommands());
-            }
+        // Allow certain commands
+        if (!command.equals("/appeal") && !command.equals("/help")) {
+            event.setCancelled(true);
+            player.sendMessage(plugin.messages().jailNoCommands());
         }
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        // Player data persists in database, no action needed
+        // Remove from cache when player quits (to save memory)
+        // Player data persists in database, will be re-cached on rejoin if still jailed
+        jailedPlayersCache.remove(event.getPlayer().getUniqueId());
     }
 }

@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit;
 public class ModrinthUpdateChecker {
 
     private static final String MODRINTH_API = "https://api.modrinth.com/v2/project/%s/version";
-    private static final String USER_AGENT = "BanHammer/3.0.0 (GitHub)";
+    private static final String USER_AGENT = "BanHammer/3.0.1 (GitHub)";
 
     private final BanHammerPlugin plugin;
     private final String projectId;
@@ -117,10 +117,11 @@ public class ModrinthUpdateChecker {
         lastCheck = now;
 
         return CompletableFuture.supplyAsync(() -> {
+            HttpURLConnection connection = null;
             try {
                 String apiUrl = String.format(MODRINTH_API, projectId);
                 URL url = new URL(apiUrl);
-                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection = (HttpURLConnection) url.openConnection();
                 connection.setRequestMethod("GET");
                 connection.setRequestProperty("User-Agent", USER_AGENT);
                 connection.setConnectTimeout(5000);
@@ -144,20 +145,28 @@ public class ModrinthUpdateChecker {
 
                 // Parse JSON
                 JsonArray versions = JsonParser.parseString(response.toString()).getAsJsonArray();
-                if (versions.size() == 0) {
+                if (versions.isEmpty()) {
                     plugin.getSLF4JLogger().warn("No versions found on Modrinth");
                     return false;
                 }
 
                 // Get latest version
                 JsonObject latestVersionObj = versions.get(0).getAsJsonObject();
-                latestVersion = latestVersionObj.get("version_number").getAsString();
+                JsonElement versionElement = latestVersionObj.get("version_number");
+                if (versionElement == null || versionElement.isJsonNull()) {
+                    plugin.getSLF4JLogger().warn("Modrinth response missing version_number");
+                    return false;
+                }
+                latestVersion = versionElement.getAsString();
 
                 // Get download URL
                 JsonArray files = latestVersionObj.getAsJsonArray("files");
-                if (files.size() > 0) {
+                if (files != null && !files.isEmpty()) {
                     JsonObject primaryFile = files.get(0).getAsJsonObject();
-                    downloadUrl = primaryFile.get("url").getAsString();
+                    JsonElement urlElement = primaryFile.get("url");
+                    if (urlElement != null && !urlElement.isJsonNull()) {
+                        downloadUrl = urlElement.getAsString();
+                    }
                 }
 
                 // Get changelog URL
@@ -171,6 +180,10 @@ public class ModrinthUpdateChecker {
                 plugin.getSLF4JLogger().warn("Failed to check for updates: {}", e.getMessage());
                 plugin.getSLF4JLogger().debug("Update check error", e);
                 return false;
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
             }
         });
     }

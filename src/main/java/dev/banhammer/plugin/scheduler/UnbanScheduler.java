@@ -108,8 +108,15 @@ public class UnbanScheduler {
                     plugin.getPunishmentManager().removeMuteFromCache(record.getVictimUuid());
                 }
                 case JAIL -> {
-                    // Release from jail
-                    plugin.getJailManager().releasePlayerByUUID(record.getVictimUuid());
+                    // Release from jail - use main thread for teleport
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        org.bukkit.entity.Player jailedPlayer = Bukkit.getPlayer(record.getVictimUuid());
+                        if (jailedPlayer != null && jailedPlayer.isOnline()) {
+                            plugin.getJailManager().releasePlayer(jailedPlayer);
+                        } else {
+                            plugin.getJailManager().releasePlayerByUUID(record.getVictimUuid());
+                        }
+                    });
                     plugin.getSLF4JLogger().info("Automatically released {} from jail (punishment expired)", record.getVictimName());
                 }
             }
@@ -163,14 +170,19 @@ public class UnbanScheduler {
             return false;
         }
 
+        // Quick check: hashed IPs (from IPAnonymizer) are hex strings, not valid IPs
+        // They won't contain dots or colons
+        if (!ip.contains(".") && !ip.contains(":")) {
+            return false;
+        }
+
         // Use Java's InetAddress for robust IP validation
         // This handles both IPv4 and all IPv6 formats (including ::1, fe80::, etc.)
         try {
             java.net.InetAddress addr = java.net.InetAddress.getByName(ip);
-            // Ensure it's a valid IP and not a hostname
-            return addr.getHostAddress().equals(ip) ||
-                   // IPv6 addresses might be normalized differently
-                   (addr instanceof java.net.Inet6Address);
+            // Ensure it's actually a numeric IP and not a hostname that was resolved
+            String normalized = addr.getHostAddress();
+            return normalized.equals(ip) || ip.equals("[" + normalized + "]");
         } catch (java.net.UnknownHostException e) {
             return false;
         }

@@ -105,30 +105,31 @@ public class EssentialsJailIntegration {
             Location jailLocation = (Location) jailLocationObj;
 
             // Log jail location details for debugging
-            logger.info("DEBUG TELEPORT: Attempting to teleport {} to jail", player.getName());
-            logger.info("DEBUG TELEPORT: Jail location: World={}, X={}, Y={}, Z={}",
+            logger.debug("Attempting to teleport {} to jail", player.getName());
+            logger.debug("Jail location: World={}, X={}, Y={}, Z={}",
                 jailLocation.getWorld() != null ? jailLocation.getWorld().getName() : "null",
                 jailLocation.getX(), jailLocation.getY(), jailLocation.getZ());
-            logger.info("DEBUG TELEPORT: Player current location: World={}, X={}, Y={}, Z={}",
+            logger.debug("Player current location: World={}, X={}, Y={}, Z={}",
                 player.getLocation().getWorld().getName(),
                 player.getLocation().getX(), player.getLocation().getY(), player.getLocation().getZ());
 
-            // Teleport player to jail FIRST
-            boolean teleportSuccess = player.teleport(jailLocation);
-            logger.info("DEBUG TELEPORT: Teleport result: {}", teleportSuccess);
-            logger.info("DEBUG TELEPORT: Player location after teleport: World={}, X={}, Y={}, Z={}",
-                player.getLocation().getWorld().getName(),
-                player.getLocation().getX(), player.getLocation().getY(), player.getLocation().getZ());
-
-            // Then set jailed status
+            // FIXED: Set jailed status FIRST to prevent race conditions
+            // This ensures Essentials knows the player is jailed before teleportation
             Method setJailedMethod = user.getClass().getMethod("setJailed", boolean.class);
             setJailedMethod.invoke(user, true);
-            logger.info("DEBUG TELEPORT: Set jailed status to true");
+            logger.debug("Set jailed status to true");
 
             // Set jail name
             Method setJailMethod = user.getClass().getMethod("setJail", String.class);
             setJailMethod.invoke(user, jailName);
-            logger.info("DEBUG TELEPORT: Set jail name to '{}'", jailName);
+            logger.debug("Set jail name to '{}'", jailName);
+
+            // Then teleport player to jail (after status is set)
+            boolean teleportSuccess = player.teleport(jailLocation);
+            logger.debug("Teleport result: {}", teleportSuccess);
+            logger.debug("Player location after teleport: World={}, X={}, Y={}, Z={}",
+                player.getLocation().getWorld().getName(),
+                player.getLocation().getX(), player.getLocation().getY(), player.getLocation().getZ());
 
             logger.info("Successfully jailed {} in Essentials jail '{}'", player.getName(), jailName);
             return true;

@@ -1,6 +1,7 @@
 package dev.banhammer.plugin.listener;
 
 import dev.banhammer.plugin.BanHammerPlugin;
+import dev.banhammer.plugin.util.DurationParser;
 import dev.banhammer.plugin.util.ItemFactory;
 import dev.banhammer.plugin.util.Messages;
 import dev.banhammer.plugin.util.Settings;
@@ -20,6 +21,7 @@ import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
@@ -143,6 +145,15 @@ public final class HammerListener implements Listener {
         if (!isHammerInMainHand(player)) return;
 
         e.setCancelled(true);
+    }
+
+    // Cleanup cooldown maps on player quit to prevent memory leak
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent e) {
+        UUID uuid = e.getPlayer().getUniqueId();
+        cooldowns.remove(uuid);
+        switchCooldowns.remove(uuid);
+        switchKickJailCooldowns.remove(uuid);
     }
 
     /* =========================
@@ -352,13 +363,7 @@ public final class HammerListener implements Listener {
        ========================= */
 
     private Player findTarget(Player p, double maxDistance) {
-        try {
-            Entity direct = p.getTargetEntity((int) Math.ceil(maxDistance));
-            if (direct instanceof Player dp && !dp.getUniqueId().equals(p.getUniqueId())) {
-                return dp;
-            }
-        } catch (Throwable ignored) {}
-
+        // Use modern ray tracing API (no deprecated methods)
         RayTraceResult rt = p.getWorld().rayTraceEntities(
                 p.getEyeLocation(),
                 p.getEyeLocation().getDirection(),
@@ -492,75 +497,10 @@ public final class HammerListener implements Listener {
     }
 
     // ---- Duration-Parsing & Anzeige ----
-
-    private Duration parseDuration(String raw) {
-        if (raw == null) return null;
-        String s = raw.trim();
-        if (s.isEmpty()) return null;
-
-        // Explicit handling for "permanent" keyword
-        if (s.equalsIgnoreCase("permanent") || s.equalsIgnoreCase("perm")) {
-            return null; // null = permanent
-        }
-
-        // Try ISO-8601 format (case-insensitive)
-        if (s.toUpperCase().startsWith("P")) {
-            try {
-                return Duration.parse(s.toUpperCase());
-            } catch (Exception e) {
-                plugin.getSLF4JLogger().warn("Invalid ISO-8601 duration format: {}", s);
-                // Fall through to custom parsing
-            }
-        }
-
-        // Custom format: "7d", "1h30m", "2d12h", etc.
-        String tmp = s.toLowerCase();
-        long days = extractNumber(tmp, "d").orElse(0L);
-        long hours = extractNumber(tmp, "h").orElse(0L);
-        long minutes = extractNumber(tmp, "m").orElse(0L);
-        long seconds = extractNumber(tmp, "s").orElse(0L);
-
-        // Check if any time unit was found
-        if (days == 0 && hours == 0 && minutes == 0 && seconds == 0) {
-            plugin.getSLF4JLogger().warn("Could not parse duration: '{}'. Use format like '7d', '1h30m', or 'permanent'", raw);
-            return null; // Invalid format, default to permanent
-        }
-
-        Duration d = Duration.ZERO;
-        if (days > 0) d = d.plusDays(days);
-        if (hours > 0) d = d.plusHours(hours);
-        if (minutes > 0) d = d.plusMinutes(minutes);
-        if (seconds > 0) d = d.plusSeconds(seconds);
-
-        return d;
-    }
-
-    private Optional<Long> extractNumber(String s, String unit) {
-        int i = s.indexOf(unit);
-        if (i <= 0) return Optional.empty();
-        int j = i - 1;
-        while (j >= 0 && Character.isWhitespace(s.charAt(j))) j--;
-        int end = j + 1;
-        while (j >= 0 && Character.isDigit(s.charAt(j))) j--;
-        String num = s.substring(j + 1, end);
-        try { return Optional.of(Long.parseLong(num)); }
-        catch (NumberFormatException ex) { return Optional.empty(); }
-    }
+    // Now using shared DurationParser utility
 
     private String formatDurationHuman(Duration d) {
-        if (d == null) return "";
-        long totalSeconds = d.getSeconds();
-        long days = totalSeconds / SECONDS_PER_DAY;
-        long hours = (totalSeconds % SECONDS_PER_DAY) / SECONDS_PER_HOUR;
-        long minutes = (totalSeconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE;
-        long seconds = totalSeconds % SECONDS_PER_MINUTE;
-
-        StringBuilder sb = new StringBuilder();
-        if (days > 0) sb.append(days).append("d");
-        if (hours > 0) { if (sb.length() > 0) sb.append(" "); sb.append(hours).append("h"); }
-        if (minutes > 0) { if (sb.length() > 0) sb.append(" "); sb.append(minutes).append("m"); }
-        if (seconds > 0 && sb.length() == 0) { sb.append(seconds).append("s"); }
-        return (sb.length() == 0) ? "" : " (" + sb + ")";
+        return DurationParser.formatDisplay(d);
     }
 
     /* =========================
