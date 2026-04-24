@@ -29,7 +29,7 @@ public final class ResourcePackListener implements Listener {
         plugin.getSLF4JLogger().info("DEBUG RESOURCEPACK: Scheduling resourcepack send for {} with delay {} ticks",
             player.getName(), delay);
 
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+        dev.banhammer.plugin.util.FoliaScheduler.runOnEntityDelayed(plugin, player, () -> {
             ResourcePackSender.Result result = plugin.resourcePackSender().sendPreferredPack(player);
             if (result == ResourcePackSender.Result.NONE) {
                 plugin.getSLF4JLogger().warn("DEBUG RESOURCEPACK: No resourcepack available for {}", player.getName());

@@ -1,10 +1,11 @@
-# BanHammer 3.0.0 - Enhanced Edition
+# BanHammer 3.1.0 - Enhanced Edition
 
 <div align="center">
 
-**The ultimate ban hammer for Paper 1.21.x servers with extended moderation features**
+**The ultimate ban hammer for Paper & Folia 1.21.x servers with extended moderation features**
 
 [![Minecraft Version](https://img.shields.io/badge/Minecraft-1.21.x-brightgreen.svg)](https://papermc.io/)
+[![Folia Support](https://img.shields.io/badge/Folia-Supported-blue.svg)](https://papermc.io/software/folia)
 [![Java Version](https://img.shields.io/badge/Java-21-orange.svg)](https://adoptium.net/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -32,7 +33,8 @@
 
 BanHammer is a powerful moderation plugin for Minecraft Paper servers that provides a special "Ban Hammer" item. With this, administrators can ban or kick players in a dramatic and entertaining way - including lightning, particles, and sound effects!
 
-**Version 3.0.0** brings massive enhancements:
+**Version 3.1.0** brings massive enhancements:
+- ✅ **Folia Support** - Dual-compatible with Paper and Folia from a single JAR
 - ✅ **Ban Presets System** - Quick switching between predefined ban types
 - ✅ **Kick/Jail Presets System** - Left-click preset cycling for kicks and jails
 - ✅ Complete database system (SQLite & MySQL)
@@ -409,14 +411,14 @@ pm.getHistory(playerUuid, 50)
 ## 🚀 Installation
 
 1. **Requirements:**
-   - Paper Server 1.21.x or higher
+   - Paper or Folia Server 1.21.x or higher
    - Java 21 or higher
    - Optional: MySQL Server (for MySQL mode)
 
 2. **Install Plugin:**
    ```bash
    # Copy plugin JAR to plugins/ folder
-   cp banhammer-3.0.0.jar server/plugins/
+   cp banhammer-3.1.0.jar server/plugins/
 
    # Start server
    ./start.sh
@@ -796,6 +798,12 @@ ban:
   duration: "7d"  # 7 days
   # Or: "1h30m", "PT24H", etc.
 ```
+</details>
+
+<details>
+<summary><b>Does it work with Folia?</b></summary>
+
+Yes! Since version 3.1.0, BanHammer fully supports Folia. The plugin automatically detects whether it's running on Paper or Folia at startup and uses the correct scheduler APIs. No configuration needed — just use the same JAR on both platforms.
 </details>
 
 <details>

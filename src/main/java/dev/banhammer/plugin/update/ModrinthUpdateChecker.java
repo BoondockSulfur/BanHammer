@@ -5,9 +5,9 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dev.banhammer.plugin.BanHammerPlugin;
+import dev.banhammer.plugin.util.FoliaScheduler;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
-import org.bukkit.scheduler.BukkitTask;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit;
 public class ModrinthUpdateChecker {
 
     private static final String MODRINTH_API = "https://api.modrinth.com/v2/project/%s/version";
-    private static final String USER_AGENT = "BanHammer/3.0.1 (GitHub)";
+    private static final String USER_AGENT = "BanHammer/3.1.0 (GitHub)";
 
     private final BanHammerPlugin plugin;
     private final String projectId;
@@ -35,7 +35,7 @@ public class ModrinthUpdateChecker {
     private final boolean notifyAdmins;
     private final long checkInterval;
 
-    private BukkitTask periodicTask;
+    private Object periodicTask;
     private String latestVersion;
     private String downloadUrl;
     private String changelogUrl;
@@ -76,7 +76,7 @@ public class ModrinthUpdateChecker {
         // Schedule periodic checks
         if (checkInterval > 0) {
             long intervalTicks = checkInterval * 60 * 60 * 20; // Hours to ticks
-            periodicTask = Bukkit.getScheduler().runTaskTimerAsynchronously(
+            periodicTask = FoliaScheduler.runAsyncRepeating(
                     plugin,
                     () -> checkForUpdates().thenAccept(updateAvailable -> {
                         if (updateAvailable && notifyAdmins) {
@@ -95,8 +95,8 @@ public class ModrinthUpdateChecker {
      * Stops the periodic update checker.
      */
     public void stop() {
-        if (periodicTask != null && !periodicTask.isCancelled()) {
-            periodicTask.cancel();
+        if (periodicTask != null) {
+            FoliaScheduler.cancelTask(periodicTask);
             plugin.getSLF4JLogger().info("Update checker stopped");
         }
     }
@@ -233,7 +233,7 @@ public class ModrinthUpdateChecker {
      * Notifies online admins about available update.
      */
     private void notifyOnlineAdmins() {
-        Bukkit.getScheduler().runTask(plugin, () -> {
+        FoliaScheduler.runGlobal(plugin, () -> {
             for (Player player : Bukkit.getOnlinePlayers()) {
                 if (player.hasPermission("banhammer.updatenotify")) {
                     player.sendMessage("§8[§6BanHammer§8] §aUpdate available: §e" + currentVersion + " §7→ §a" + latestVersion);

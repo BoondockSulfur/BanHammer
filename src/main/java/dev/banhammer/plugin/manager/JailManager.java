@@ -3,11 +3,11 @@ package dev.banhammer.plugin.manager;
 import dev.banhammer.plugin.BanHammerPlugin;
 import dev.banhammer.plugin.database.model.PunishmentType;
 import dev.banhammer.plugin.integration.EssentialsJailIntegration;
+import dev.banhammer.plugin.util.FoliaScheduler;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.Player;
-import org.bukkit.scheduler.BukkitTask;
 
 import java.util.Map;
 import java.util.UUID;
@@ -25,7 +25,7 @@ public class JailManager {
     private final Map<UUID, Location> jailedPlayers = new ConcurrentHashMap<>();
     private final Map<UUID, Location> returnLocations = new ConcurrentHashMap<>();
     private Location jailLocation;
-    private BukkitTask cleanupTask;
+    private Object cleanupTask;
 
     public JailManager(BanHammerPlugin plugin, EssentialsJailIntegration essentialsJail) {
         this.plugin = plugin;
@@ -102,7 +102,7 @@ public class JailManager {
         returnLocations.put(player.getUniqueId(), player.getLocation().clone());
 
         // Teleport to jail
-        player.teleport(jailLocation);
+        FoliaScheduler.teleportAsync(plugin, player, jailLocation);
         jailedPlayers.put(player.getUniqueId(), jailLocation);
 
         // Add to JailListener cache for performance
@@ -140,7 +140,7 @@ public class JailManager {
             if (success) {
                 // Teleport back to original location (Essentials doesn't do this)
                 if (returnLoc != null && returnLoc.getWorld() != null) {
-                    player.teleport(returnLoc);
+                    FoliaScheduler.teleportAsync(plugin, player, returnLoc);
                 }
 
                 player.sendMessage(plugin.messages().unjailed());
@@ -153,7 +153,7 @@ public class JailManager {
 
         // Handle built-in jail release - teleport back to original location
         if (returnLoc != null && returnLoc.getWorld() != null) {
-            player.teleport(returnLoc);
+            FoliaScheduler.teleportAsync(plugin, player, returnLoc);
         }
 
         player.sendMessage(plugin.messages().unjailed());
@@ -221,7 +221,7 @@ public class JailManager {
             playerLoc.distance(jailLocation) > maxDistance) {
 
             // Teleport back to jail
-            player.teleport(jailLocation);
+            FoliaScheduler.teleportAsync(plugin, player, jailLocation);
             player.sendMessage(plugin.messages().jailEscape());
         }
     }
@@ -271,7 +271,7 @@ public class JailManager {
                     .findFirst()
                     .ifPresent(p -> {
                         // Check if player is still online before jailing to prevent concurrent modification
-                        Bukkit.getScheduler().runTask(plugin, () -> {
+                        FoliaScheduler.runOnEntity(plugin, player, () -> {
                             if (player.isOnline()) {
                                 jailPlayer(player);
                             }
@@ -321,7 +321,7 @@ public class JailManager {
      */
     private void startCleanupTask() {
         // Run cleanup every 5 minutes (6000 ticks)
-        cleanupTask = Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
+        cleanupTask = FoliaScheduler.runAsyncRepeating(plugin, () -> {
             int removed = cleanupOfflineJails();
             if (removed > 0) {
                 plugin.getSLF4JLogger().debug("Cleaned up {} offline jailed players from memory", removed);
@@ -356,8 +356,6 @@ public class JailManager {
      * Stops the cleanup task (called on plugin disable).
      */
     public void shutdown() {
-        if (cleanupTask != null) {
-            cleanupTask.cancel();
-        }
+        FoliaScheduler.cancelTask(cleanupTask);
     }
 }

@@ -5,9 +5,9 @@ import dev.banhammer.plugin.database.Database;
 import dev.banhammer.plugin.database.model.PunishmentRecord;
 import dev.banhammer.plugin.event.PlayerUnpunishedEvent;
 import dev.banhammer.plugin.integration.DiscordWebhook;
+import dev.banhammer.plugin.util.FoliaScheduler;
 import org.bukkit.BanList;
 import org.bukkit.Bukkit;
-import org.bukkit.scheduler.BukkitTask;
 
 import java.time.Instant;
 import java.util.List;
@@ -24,7 +24,7 @@ public class UnbanScheduler {
     private final BanHammerPlugin plugin;
     private final Database database;
     private final DiscordWebhook discord;
-    private BukkitTask task;
+    private Object task;
     private final boolean enabled;
 
     public UnbanScheduler(BanHammerPlugin plugin, Database database, DiscordWebhook discord) {
@@ -45,7 +45,7 @@ public class UnbanScheduler {
 
         long checkInterval = plugin.getConfig().getLong("tempBans.checkInterval", 60) * 20L; // Convert to ticks
 
-        task = Bukkit.getScheduler().runTaskTimerAsynchronously(
+        task = FoliaScheduler.runAsyncRepeating(
                 plugin,
                 this::checkExpiredPunishments,
                 SCHEDULER_BAN_CHECK_DELAY,
@@ -59,8 +59,8 @@ public class UnbanScheduler {
      * Stops the scheduler.
      */
     public void stop() {
-        if (task != null && !task.isCancelled()) {
-            task.cancel();
+        if (task != null) {
+            FoliaScheduler.cancelTask(task);
             plugin.getSLF4JLogger().info("Auto-unban scheduler stopped");
         }
     }
@@ -108,15 +108,14 @@ public class UnbanScheduler {
                     plugin.getPunishmentManager().removeMuteFromCache(record.getVictimUuid());
                 }
                 case JAIL -> {
-                    // Release from jail - use main thread for teleport
-                    Bukkit.getScheduler().runTask(plugin, () -> {
-                        org.bukkit.entity.Player jailedPlayer = Bukkit.getPlayer(record.getVictimUuid());
-                        if (jailedPlayer != null && jailedPlayer.isOnline()) {
-                            plugin.getJailManager().releasePlayer(jailedPlayer);
-                        } else {
-                            plugin.getJailManager().releasePlayerByUUID(record.getVictimUuid());
-                        }
-                    });
+                    // Release from jail - use entity scheduler for teleport
+                    org.bukkit.entity.Player jailedPlayer = Bukkit.getPlayer(record.getVictimUuid());
+                    if (jailedPlayer != null && jailedPlayer.isOnline()) {
+                        FoliaScheduler.runOnEntity(plugin, jailedPlayer, () ->
+                                plugin.getJailManager().releasePlayer(jailedPlayer));
+                    } else {
+                        plugin.getJailManager().releasePlayerByUUID(record.getVictimUuid());
+                    }
                     plugin.getSLF4JLogger().info("Automatically released {} from jail (punishment expired)", record.getVictimName());
                 }
             }
@@ -128,8 +127,8 @@ public class UnbanScheduler {
                         record.setUnbanReason("Expired automatically");
                         record.setUnbannedAt(Instant.now());
 
-                        // Fire event on main thread
-                        Bukkit.getScheduler().runTask(plugin, () -> {
+                        // Fire event on global/main thread
+                        FoliaScheduler.runGlobal(plugin, () -> {
                             PlayerUnpunishedEvent event = new PlayerUnpunishedEvent(
                                     null,
                                     record,

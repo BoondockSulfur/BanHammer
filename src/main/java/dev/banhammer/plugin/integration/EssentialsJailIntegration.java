@@ -125,8 +125,9 @@ public class EssentialsJailIntegration {
             logger.debug("Set jail name to '{}'", jailName);
 
             // Then teleport player to jail (after status is set)
-            boolean teleportSuccess = player.teleport(jailLocation);
-            logger.debug("Teleport result: {}", teleportSuccess);
+            dev.banhammer.plugin.util.FoliaScheduler.teleportAsync(
+                    dev.banhammer.plugin.BanHammerPlugin.get(), player, jailLocation);
+            logger.debug("Teleport initiated (async-safe)");
             logger.debug("Player location after teleport: World={}, X={}, Y={}, Z={}",
                 player.getLocation().getWorld().getName(),
                 player.getLocation().getX(), player.getLocation().getY(), player.getLocation().getZ());

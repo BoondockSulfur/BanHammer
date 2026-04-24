@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.1.0] - 2026-04-24
+
+### 🎉 New Feature
+
+#### Folia Support (Dual-Compatibility)
+- **Paper + Folia** from a single JAR — automatically detects the platform at startup
+- New `FoliaScheduler` utility class abstracts all scheduler, teleport and kick operations
+- `plugin.yml` declares `folia-supported: true`
+
+**Migrated APIs:**
+- All `Bukkit.getScheduler().runTask()` calls → `FoliaScheduler.runGlobal()` / `runOnEntity()`
+- All `runTaskTimerAsynchronously()` calls → `FoliaScheduler.runAsyncRepeating()`
+- All `player.teleport()` calls → `FoliaScheduler.teleportAsync()` (uses `teleportAsync()` on Folia)
+- All `BukkitTask` fields → `Object` with `FoliaScheduler.cancelTask()`
+- GUI `openInventory()` calls run on entity scheduler for correct thread ownership
+- Resource pack sending uses entity-delayed scheduler
+
+**Files changed:**
+- `BanHammerPlugin.java` — Folia detection on startup
+- `PunishmentManager.java` — 13 scheduler replacements
+- `UnbanScheduler.java` — async scheduler, entity scheduler for jail release
+- `JailManager.java` — 4 teleport migrations, scheduler migration
+- `ModrinthUpdateChecker.java` — async scheduler, global scheduler for notifications
+- `StatisticsGUI.java` — entity scheduler for inventory operations
+- `ResourcePackListener.java` — entity-delayed scheduler
+- `EssentialsJailIntegration.java` — async teleport
+
+**No changes needed:** `HammerListener.java`, `AppealCommand.java`, `BanHammerCommand.java` — events already fire on correct regional threads.
+
+---
+
 ## [3.0.1] - 2026-04-18
 
 ### 🐛 Bug Fixes

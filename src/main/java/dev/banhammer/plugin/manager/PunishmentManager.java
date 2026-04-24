@@ -10,6 +10,7 @@ import dev.banhammer.plugin.event.PlayerUnpunishedEvent;
 import dev.banhammer.plugin.integration.DiscordWebhook;
 import dev.banhammer.plugin.util.DurationParser;
 import dev.banhammer.plugin.util.IPAnonymizer;
+import dev.banhammer.plugin.util.FoliaScheduler;
 import org.bukkit.BanList;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -152,7 +153,7 @@ public class PunishmentManager {
 
                 // Fire post-event
                 PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-                Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
+                FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
 
                 // Discord notification
                 if (discord != null) {
@@ -164,7 +165,7 @@ public class PunishmentManager {
         } else {
             // Database disabled, still send Discord notification and fire event
             PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-            Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
+            FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
 
             if (discord != null) {
                 discord.sendPunishment(record);
@@ -219,7 +220,7 @@ public class PunishmentManager {
                 record.setId(id);
 
                 PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-                Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
+                FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
 
                 if (discord != null) {
                     discord.sendPunishment(record);
@@ -230,7 +231,7 @@ public class PunishmentManager {
         } else {
             // Database disabled, still send Discord notification and fire event
             PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-            Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
+            FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
 
             if (discord != null) {
                 discord.sendPunishment(record);
@@ -282,7 +283,7 @@ public class PunishmentManager {
                                         record.setUnbannedAt(Instant.now());
 
                                         PlayerUnpunishedEvent event = new PlayerUnpunishedEvent(staff, record, reason, false);
-                                        Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(event));
+                                        FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(event));
 
                                         if (discord != null) {
                                             discord.sendUnpunishment(record, staff.getName(), reason);
@@ -376,7 +377,7 @@ public class PunishmentManager {
                 activeMutes.put(victim.getUniqueId(), record);
 
                 PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-                Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
+                FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
 
                 if (discord != null) {
                     discord.sendPunishment(record);
@@ -390,7 +391,7 @@ public class PunishmentManager {
             activeMutes.put(victim.getUniqueId(), record);
 
             PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-            Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
+            FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
 
             if (discord != null) {
                 discord.sendPunishment(record);
@@ -433,7 +434,7 @@ public class PunishmentManager {
                                         activeMutes.remove(playerUuid);
 
                                         PlayerUnpunishedEvent event = new PlayerUnpunishedEvent(staff, record, reason, false);
-                                        Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(event));
+                                        FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(event));
 
                                         if (discord != null) {
                                             discord.sendUnpunishment(record, staff.getName(), reason);
@@ -501,7 +502,7 @@ public class PunishmentManager {
                 record.setId(id);
 
                 PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-                Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
+                FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
 
                 if (discord != null) {
                     discord.sendPunishment(record);
@@ -512,7 +513,7 @@ public class PunishmentManager {
         } else {
             // Database disabled, still send Discord notification and fire event
             PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-            Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
+            FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
 
             if (discord != null) {
                 discord.sendPunishment(record);
@@ -549,7 +550,7 @@ public class PunishmentManager {
                                         record.setUnbannedAt(Instant.now());
 
                                         PlayerUnpunishedEvent event = new PlayerUnpunishedEvent(staff, record, reason, false);
-                                        Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(event));
+                                        FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(event));
 
                                         if (discord != null) {
                                             discord.sendUnpunishment(record, staff.getName(), reason);
@@ -601,7 +602,7 @@ public class PunishmentManager {
                 record.setId(id);
 
                 PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-                Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
+                FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
 
                 if (discord != null) {
                     discord.sendPunishment(record);
@@ -614,7 +615,7 @@ public class PunishmentManager {
             // Database disabled, still send Discord notification and fire event
             // Note: Auto-ban threshold won't work without database
             PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-            Bukkit.getScheduler().runTask(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
+            FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
 
             if (discord != null) {
                 discord.sendPunishment(record);
@@ -646,7 +647,7 @@ public class PunishmentManager {
                 Duration duration = parseDuration(autoBanDuration);
                 String reason = "Automatischer Ban: " + warningCount + " Verwarnungen erreicht";
 
-                Bukkit.getScheduler().runTask(plugin, () -> {
+                FoliaScheduler.runGlobal(plugin, () -> {
                     banPlayer(staff, victim, reason, duration, false).thenAccept(banId -> {
                         plugin.getSLF4JLogger().info("Player {} auto-banned after {} warnings", victim.getName(), warningCount);
                     });

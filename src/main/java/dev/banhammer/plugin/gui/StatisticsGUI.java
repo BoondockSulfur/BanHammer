@@ -93,7 +93,7 @@ public class StatisticsGUI {
         }
 
         plugin.getPunishmentManager().getHistory(targetUuid, 100).thenAccept(history -> {
-            Bukkit.getScheduler().runTask(plugin, () -> {
+            dev.banhammer.plugin.util.FoliaScheduler.runOnEntity(plugin, player, () -> {
                 Inventory inv = Bukkit.createInventory(null, 54, Component.text("Spieler Statistiken").color(NamedTextColor.GOLD));
 
                 // Summary at top
@@ -155,7 +155,7 @@ public class StatisticsGUI {
         }
 
         plugin.getDatabase().getStaffStatistics(45).thenAccept(stats -> {
-            Bukkit.getScheduler().runTask(plugin, () -> {
+            dev.banhammer.plugin.util.FoliaScheduler.runOnEntity(plugin, player, () -> {
                 Inventory inv = Bukkit.createInventory(null, 54, Component.text("Staff Leaderboard").color(NamedTextColor.GOLD));
 
                 int slot = 0;
@@ -216,7 +216,7 @@ public class StatisticsGUI {
 
         // Aggregate all staff statistics for server-wide stats
         plugin.getDatabase().getStaffStatistics(1000).thenAccept(staffStats -> {
-            Bukkit.getScheduler().runTask(plugin, () -> {
+            dev.banhammer.plugin.util.FoliaScheduler.runOnEntity(plugin, player, () -> {
                 // Calculate totals
                 int totalBans = 0;
                 int totalKicks = 0;

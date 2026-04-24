@@ -5,7 +5,7 @@
 
   <groupId>dev.banhammer</groupId>
   <artifactId>banhammer</artifactId>
-  <version>3.0.1</version>
+  <version>3.1.0</version>
   <name>BanHammer</name>
   <description>Admin Ban Hammer for Paper 1.21.x - Enhanced Edition</description>
 

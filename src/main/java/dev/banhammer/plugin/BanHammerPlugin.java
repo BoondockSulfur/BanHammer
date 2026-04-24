@@ -47,6 +47,12 @@ public class BanHammerPlugin extends JavaPlugin {
     public void onEnable() {
         instance = this;
 
+        // Detect Folia vs Paper
+        dev.banhammer.plugin.util.FoliaScheduler.init();
+        if (dev.banhammer.plugin.util.FoliaScheduler.isFolia()) {
+            getSLF4JLogger().info("Folia detected - using region-based schedulers");
+        }
+
         // Save and load config
         saveDefaultConfig();
 
@@ -138,7 +144,7 @@ public class BanHammerPlugin extends JavaPlugin {
         Objects.requireNonNull(getCommand("mute")).setTabCompleter(punishCmd);
         Objects.requireNonNull(getCommand("jail")).setTabCompleter(punishCmd);
 
-        getSLF4JLogger().info("BanHammer v3.0.1 enabled successfully!");
+        getSLF4JLogger().info("BanHammer v3.1.0 enabled successfully!");
     }
 
     @Override
@@ -214,8 +220,8 @@ public class BanHammerPlugin extends JavaPlugin {
                     database = tempDatabase;
                     getSLF4JLogger().info("Database initialized successfully");
 
-                    // Initialize database-dependent components on main thread
-                    getServer().getScheduler().runTask(this, this::initializeDatabaseDependentComponents);
+                    // Initialize database-dependent components on main/global thread
+                    dev.banhammer.plugin.util.FoliaScheduler.runGlobal(this, this::initializeDatabaseDependentComponents);
                 }
             });
     }
