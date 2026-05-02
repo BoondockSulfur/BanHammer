@@ -1,4 +1,4 @@
-# BanHammer 3.1.0 - Enhanced Edition
+# BanHammer 3.1.1 - Enhanced Edition
 
 <div align="center">
 
@@ -33,7 +33,7 @@
 
 BanHammer is a powerful moderation plugin for Minecraft Paper servers that provides a special "Ban Hammer" item. With this, administrators can ban or kick players in a dramatic and entertaining way - including lightning, particles, and sound effects!
 
-**Version 3.1.0** brings massive enhancements:
+**Version 3.1.1** brings massive enhancements:
 - ✅ **Folia Support** - Dual-compatible with Paper and Folia from a single JAR
 - ✅ **Ban Presets System** - Quick switching between predefined ban types
 - ✅ **Kick/Jail Presets System** - Left-click preset cycling for kicks and jails
@@ -418,7 +418,7 @@ pm.getHistory(playerUuid, 50)
 2. **Install Plugin:**
    ```bash
    # Copy plugin JAR to plugins/ folder
-   cp banhammer-3.1.0.jar server/plugins/
+   cp banhammer-3.1.1.jar server/plugins/
 
    # Start server
    ./start.sh
@@ -803,7 +803,7 @@ ban:
 <details>
 <summary><b>Does it work with Folia?</b></summary>
 
-Yes! Since version 3.1.0, BanHammer fully supports Folia. The plugin automatically detects whether it's running on Paper or Folia at startup and uses the correct scheduler APIs. No configuration needed — just use the same JAR on both platforms.
+Yes! Since version 3.1.1, BanHammer fully supports Folia. The plugin automatically detects whether it's running on Paper or Folia at startup and uses the correct scheduler APIs. No configuration needed — just use the same JAR on both platforms.
 </details>
 
 <details>

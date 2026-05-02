@@ -1,6 +1,6 @@
 name: BanHammer
 main: dev.banhammer.plugin.BanHammerPlugin
-version: 3.1.0
+version: 3.1.1
 api-version: '1.21'
 load: POSTWORLD
 folia-supported: true

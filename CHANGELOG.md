@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.1.1] - 2026-05-02
+
+### 🔧 Improvement
+
+#### Update Checker - Game Version Filter
+- **Update notifications are now filtered by Minecraft version** — servers only see updates compatible with their game version
+- Uses `Bukkit.getMinecraftVersion()` to detect the running server version
+- Passes `game_versions` parameter to Modrinth API to filter releases
+- **Why:** Prepares for Paper 26.x support — 1.21.x users won't receive update notifications for incompatible 26.x releases (and vice versa)
+
+---
+
 ## [3.1.0] - 2026-04-24
 
 ### 🎉 New Feature

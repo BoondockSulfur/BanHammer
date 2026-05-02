@@ -13,6 +13,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -25,11 +26,12 @@ import java.util.concurrent.TimeUnit;
 public class ModrinthUpdateChecker {
 
     private static final String MODRINTH_API = "https://api.modrinth.com/v2/project/%s/version";
-    private static final String USER_AGENT = "BanHammer/3.1.0 (GitHub)";
+    private static final String USER_AGENT = "BanHammer/3.1.1 (GitHub)";
 
     private final BanHammerPlugin plugin;
     private final String projectId;
     private final String currentVersion;
+    private final String gameVersion;
     private final boolean enabled;
     private final boolean checkOnStartup;
     private final boolean notifyAdmins;
@@ -44,6 +46,7 @@ public class ModrinthUpdateChecker {
     public ModrinthUpdateChecker(BanHammerPlugin plugin) {
         this.plugin = plugin;
         this.currentVersion = plugin.getDescription().getVersion();
+        this.gameVersion = Bukkit.getMinecraftVersion();
         this.enabled = plugin.getConfig().getBoolean("updateChecker.enabled", true);
         this.checkOnStartup = plugin.getConfig().getBoolean("updateChecker.checkOnStartup", true);
         this.notifyAdmins = plugin.getConfig().getBoolean("updateChecker.notifyAdmins", true);
@@ -117,75 +120,138 @@ public class ModrinthUpdateChecker {
         lastCheck = now;
 
         return CompletableFuture.supplyAsync(() -> {
-            HttpURLConnection connection = null;
-            try {
-                String apiUrl = String.format(MODRINTH_API, projectId);
-                URL url = new URL(apiUrl);
-                connection = (HttpURLConnection) url.openConnection();
-                connection.setRequestMethod("GET");
-                connection.setRequestProperty("User-Agent", USER_AGENT);
-                connection.setConnectTimeout(5000);
-                connection.setReadTimeout(5000);
+            // First try with game version filter
+            JsonArray versions = fetchVersions(true);
 
-                int responseCode = connection.getResponseCode();
-                if (responseCode != 200) {
-                    plugin.getSLF4JLogger().warn("Failed to check for updates (HTTP {})", responseCode);
-                    return false;
-                }
-
-                // Read response
-                StringBuilder response = new StringBuilder();
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        response.append(line);
-                    }
-                }
-
-                // Parse JSON
-                JsonArray versions = JsonParser.parseString(response.toString()).getAsJsonArray();
-                if (versions.isEmpty()) {
+            // Fallback: if no versions found for this game version, fetch all and filter locally
+            if (versions == null || versions.isEmpty()) {
+                plugin.getSLF4JLogger().debug("No versions found for game version {}, trying unfiltered fallback", gameVersion);
+                JsonArray allVersions = fetchVersions(false);
+                if (allVersions == null || allVersions.isEmpty()) {
                     plugin.getSLF4JLogger().warn("No versions found on Modrinth");
                     return false;
                 }
-
-                // Get latest version
-                JsonObject latestVersionObj = versions.get(0).getAsJsonObject();
-                JsonElement versionElement = latestVersionObj.get("version_number");
-                if (versionElement == null || versionElement.isJsonNull()) {
-                    plugin.getSLF4JLogger().warn("Modrinth response missing version_number");
+                versions = filterByGameVersion(allVersions);
+                if (versions.isEmpty()) {
+                    plugin.getSLF4JLogger().info("No compatible versions found for Minecraft {}", gameVersion);
                     return false;
                 }
-                latestVersion = versionElement.getAsString();
+            }
 
-                // Get download URL
-                JsonArray files = latestVersionObj.getAsJsonArray("files");
-                if (files != null && !files.isEmpty()) {
-                    JsonObject primaryFile = files.get(0).getAsJsonObject();
-                    JsonElement urlElement = primaryFile.get("url");
-                    if (urlElement != null && !urlElement.isJsonNull()) {
-                        downloadUrl = urlElement.getAsString();
-                    }
-                }
-
-                // Get changelog URL
-                changelogUrl = "https://modrinth.com/plugin/" + projectId + "/version/" + latestVersion;
-
-                plugin.getSLF4JLogger().debug("Current version: {}, Latest version: {}", currentVersion, latestVersion);
-
-                return isNewerVersion(latestVersion);
-
-            } catch (Exception e) {
-                plugin.getSLF4JLogger().warn("Failed to check for updates: {}", e.getMessage());
-                plugin.getSLF4JLogger().debug("Update check error", e);
+            // Get latest version
+            JsonObject latestVersionObj = versions.get(0).getAsJsonObject();
+            JsonElement versionElement = latestVersionObj.get("version_number");
+            if (versionElement == null || versionElement.isJsonNull()) {
+                plugin.getSLF4JLogger().warn("Modrinth response missing version_number");
                 return false;
-            } finally {
-                if (connection != null) {
-                    connection.disconnect();
+            }
+            latestVersion = versionElement.getAsString();
+
+            // Get download URL
+            JsonArray files = latestVersionObj.getAsJsonArray("files");
+            if (files != null && !files.isEmpty()) {
+                JsonObject primaryFile = files.get(0).getAsJsonObject();
+                JsonElement urlElement = primaryFile.get("url");
+                if (urlElement != null && !urlElement.isJsonNull()) {
+                    downloadUrl = urlElement.getAsString();
                 }
             }
+
+            // Get changelog URL
+            changelogUrl = "https://modrinth.com/plugin/" + projectId + "/version/" + latestVersion;
+
+            plugin.getSLF4JLogger().debug("Current version: {}, Latest version: {}", currentVersion, latestVersion);
+
+            return isNewerVersion(latestVersion);
         });
+    }
+
+    /**
+     * Fetches versions from Modrinth API.
+     *
+     * @param filterByGameVersion whether to include the game_versions query parameter
+     * @return JsonArray of versions, or null on error
+     */
+    private JsonArray fetchVersions(boolean filterByGameVersion) {
+        HttpURLConnection connection = null;
+        try {
+            String apiUrl = String.format(MODRINTH_API, projectId);
+            if (filterByGameVersion) {
+                apiUrl += "?game_versions=" + URLEncoder.encode("[\"" + gameVersion + "\"]", StandardCharsets.UTF_8);
+            }
+            URL url = new URL(apiUrl);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("User-Agent", USER_AGENT);
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+
+            int responseCode = connection.getResponseCode();
+            if (responseCode != 200) {
+                plugin.getSLF4JLogger().warn("Failed to check for updates (HTTP {})", responseCode);
+                return null;
+            }
+
+            StringBuilder response = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    response.append(line);
+                }
+            }
+
+            return JsonParser.parseString(response.toString()).getAsJsonArray();
+
+        } catch (Exception e) {
+            plugin.getSLF4JLogger().warn("Failed to check for updates: {}", e.getMessage());
+            plugin.getSLF4JLogger().debug("Update check error", e);
+            return null;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    /**
+     * Filters versions locally by checking if the game_versions array contains
+     * the current server's game version or its major.minor prefix.
+     *
+     * @param allVersions all versions from Modrinth
+     * @return filtered JsonArray with only compatible versions
+     */
+    private JsonArray filterByGameVersion(JsonArray allVersions) {
+        String majorMinor = getMajorMinor(gameVersion);
+        JsonArray filtered = new JsonArray();
+
+        for (JsonElement element : allVersions) {
+            JsonObject version = element.getAsJsonObject();
+            JsonArray gameVersions = version.getAsJsonArray("game_versions");
+            if (gameVersions == null) continue;
+
+            for (JsonElement gv : gameVersions) {
+                String tagged = gv.getAsString();
+                if (tagged.equals(gameVersion) || getMajorMinor(tagged).equals(majorMinor)) {
+                    filtered.add(version);
+                    break;
+                }
+            }
+        }
+
+        return filtered;
+    }
+
+    /**
+     * Extracts the major.minor portion of a version string.
+     * Example: "1.21.1" -> "1.21", "26.1.2" -> "26.1"
+     */
+    private String getMajorMinor(String version) {
+        int firstDot = version.indexOf('.');
+        if (firstDot < 0) return version;
+        int secondDot = version.indexOf('.', firstDot + 1);
+        if (secondDot < 0) return version;
+        return version.substring(0, secondDot);
     }
 
     /**

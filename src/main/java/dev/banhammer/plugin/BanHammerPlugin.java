@@ -144,7 +144,7 @@ public class BanHammerPlugin extends JavaPlugin {
         Objects.requireNonNull(getCommand("mute")).setTabCompleter(punishCmd);
         Objects.requireNonNull(getCommand("jail")).setTabCompleter(punishCmd);
 
-        getSLF4JLogger().info("BanHammer v3.1.0 enabled successfully!");
+        getSLF4JLogger().info("BanHammer v3.1.1 enabled successfully!");
     }
 
     @Override
