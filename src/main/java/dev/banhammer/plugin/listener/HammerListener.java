@@ -524,29 +524,37 @@ public final class HammerListener implements Listener {
        ========================= */
 
     private void sendCompat(Player p, Object msg) {
-        try {
-            if (msg instanceof Component comp) { p.sendMessage(comp); return; }
-        } catch (Throwable ignored) {}
-        p.sendMessage(msg == null ? "" : String.valueOf(msg));
+        if (msg instanceof Component comp) {
+            p.sendMessage(comp);
+        } else {
+            net.kyori.adventure.text.minimessage.MiniMessage mm = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage();
+            try {
+                p.sendMessage(mm.deserialize(msg == null ? "" : String.valueOf(msg)));
+            } catch (Exception e) {
+                p.sendMessage(Component.text(msg == null ? "" : String.valueOf(msg)));
+            }
+        }
     }
 
     private void broadcastCompat(Object msg) {
-        try {
-            if (msg instanceof Component comp) {
-                try { Bukkit.getServer().broadcast(comp); return; }
-                catch (Throwable ignored) {}
-                for (Player pl : Bukkit.getOnlinePlayers()) pl.sendMessage(comp);
-                return;
+        if (msg instanceof Component comp) {
+            Bukkit.getServer().broadcast(comp);
+        } else {
+            net.kyori.adventure.text.minimessage.MiniMessage mm = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage();
+            try {
+                Bukkit.getServer().broadcast(mm.deserialize(msg == null ? "" : String.valueOf(msg)));
+            } catch (Exception e) {
+                Bukkit.getServer().broadcast(Component.text(msg == null ? "" : String.valueOf(msg)));
             }
-        } catch (Throwable ignored) {}
-        Bukkit.broadcastMessage(msg == null ? "" : String.valueOf(msg));
+        }
     }
 
     private void kickOnlyCompat(Player victim, Object reason) {
-        try {
-            if (reason instanceof Component comp) { victim.kick(comp); return; }
-        } catch (Throwable ignored) {}
-        victim.kickPlayer(reason == null ? "" : String.valueOf(reason));
+        if (reason instanceof Component comp) {
+            victim.kick(comp);
+        } else {
+            victim.kick(Component.text(reason == null ? "" : String.valueOf(reason)));
+        }
     }
 
     private void sendActionBar(Player player, String message) {

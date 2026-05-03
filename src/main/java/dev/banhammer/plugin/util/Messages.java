@@ -449,9 +449,6 @@ public final class Messages {
         return mm.deserialize(raw("giveUsage", "Nutzung: /banhammer give <Spieler>"));
     }
 
-    public Component resourcepackSent() {
-        return mm.deserialize(raw("resourcepackSent", "Resourcepack gesendet."));
-    }
 
     public Component historyUsage() {
         return mm.deserialize(raw("historyUsage", "Nutzung: /bh history <Spieler> [Seite]"));

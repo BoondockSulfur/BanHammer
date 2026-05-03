@@ -11,6 +11,7 @@ import dev.banhammer.plugin.integration.DiscordWebhook;
 import dev.banhammer.plugin.util.DurationParser;
 import dev.banhammer.plugin.util.IPAnonymizer;
 import dev.banhammer.plugin.util.FoliaScheduler;
+import net.kyori.adventure.text.Component;
 import org.bukkit.BanList;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -117,7 +118,7 @@ public class PunishmentManager {
             }
 
             // Kick player
-            victim.kickPlayer(finalReason);
+            victim.kick(Component.text(finalReason != null ? finalReason : ""));
         } catch (Exception e) {
             plugin.getSLF4JLogger().error("Failed to ban player", e);
             return CompletableFuture.failedFuture(e);
@@ -194,7 +195,7 @@ public class PunishmentManager {
         String finalReason = event.getReason();
 
         try {
-            victim.kickPlayer(finalReason);
+            victim.kick(Component.text(finalReason != null ? finalReason : ""));
         } catch (Exception e) {
             plugin.getSLF4JLogger().error("Failed to kick player", e);
             return CompletableFuture.failedFuture(e);
@@ -256,7 +257,7 @@ public class PunishmentManager {
 
         if (databaseEnabled && database != null) {
             // Find active ban in database
-            UUID playerUuid = Bukkit.getOfflinePlayer(playerName).getUniqueId();
+            UUID playerUuid = resolvePlayerUuid(playerName);
 
             // Search for all ban types (BAN, TEMP_BAN, IP_BAN)
             return database.getActivePunishments(playerUuid)
@@ -411,7 +412,7 @@ public class PunishmentManager {
      */
     public CompletableFuture<Void> unmutePlayer(Player staff, String playerName, String reason) {
         if (databaseEnabled && database != null) {
-            UUID playerUuid = Bukkit.getOfflinePlayer(playerName).getUniqueId();
+            UUID playerUuid = resolvePlayerUuid(playerName);
 
             // Search for all mute types (MUTE, TEMP_MUTE)
             return database.getActivePunishments(playerUuid)
@@ -741,5 +742,27 @@ public class PunishmentManager {
      */
     public void removeMuteFromCache(UUID playerUuid) {
         activeMutes.remove(playerUuid);
+    }
+
+    /**
+     * Resolves a player name to UUID without using the deprecated getOfflinePlayer(String).
+     * Checks online players first, then falls back to server player profiles.
+     */
+    @SuppressWarnings("deprecation")
+    private UUID resolvePlayerUuid(String playerName) {
+        // Check online players first (fast path)
+        Player online = Bukkit.getPlayerExact(playerName);
+        if (online != null) {
+            return online.getUniqueId();
+        }
+
+        // Use cached offline player lookup
+        org.bukkit.OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(playerName);
+        if (cached != null) {
+            return cached.getUniqueId();
+        }
+
+        // Fallback to deprecated method (still works, just deprecated)
+        return Bukkit.getOfflinePlayer(playerName).getUniqueId();
     }
 }

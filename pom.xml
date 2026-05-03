@@ -5,14 +5,14 @@
 
   <groupId>dev.banhammer</groupId>
   <artifactId>banhammer</artifactId>
-  <version>3.1.1</version>
+  <version>4.0.0</version>
   <name>BanHammer</name>
-  <description>Admin Ban Hammer for Paper 1.21.x - Enhanced Edition</description>
+  <description>Admin Ban Hammer for Paper 26.1.x - Enhanced Edition</description>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <maven.compiler.release>21</maven.compiler.release>
-    <paper.api>1.21.1-R0.1-SNAPSHOT</paper.api>
+    <maven.compiler.release>25</maven.compiler.release>
+    <paper.api>[26.1.2.build,)</paper.api>
   </properties>
 
   <repositories>
@@ -67,7 +67,7 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
-        <version>3.11.0</version>
+        <version>3.14.0</version>
         <configuration>
           <release>${maven.compiler.release}</release>
         </configuration>
@@ -75,7 +75,7 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-shade-plugin</artifactId>
-        <version>3.5.1</version>
+        <version>3.6.1</version>
         <executions>
           <execution>
             <phase>package</phase>

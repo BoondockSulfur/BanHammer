@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.0.0] - 2026-05-02
+
+### 🚀 Major Release - Paper 26.1.x Support
+
+#### Breaking Changes
+- **Minimum Java version:** 25 (up from 21)
+- **Minimum Minecraft version:** 26.1.x (Paper 26.1.2+)
+- **api-version:** `26.1` in plugin.yml
+- Not compatible with 1.21.x servers (use v3.1.1 for 1.21.x)
+
+#### Modernized API Usage
+- **Removed all deprecated `kickPlayer(String)` calls** — now uses `Player.kick(Component)` everywhere
+- **Removed `Bukkit.broadcastMessage(String)`** — now uses `Bukkit.broadcast(Component)`
+- **Removed legacy `§` color codes** — Update Checker now uses Adventure Component API with clickable links
+- **Removed deprecated `setResourcePack()` fallbacks** — now uses Adventure `ResourcePackRequest` API exclusively
+- **Removed deprecated `Server.getResourcePack()` fallback** — uses `Server.getServerResourcePack()` only
+- **Removed reflection-based ResourcePack sending** — direct API calls now that Paper 26.x provides them natively
+- **Improved `getOfflinePlayer(String)` usage** — uses `getOfflinePlayerIfCached()` first, deprecated call only as last resort
+- **Replaced `Material.CHAIN`** (removed in 26.1) with `Material.IRON_BARS` in Statistics GUI
+
+#### Build System Updates
+- Updated `maven-compiler-plugin` to 3.14.0 (Java 25 support)
+- Updated `maven-shade-plugin` to 3.6.1 (class file version 69 / Java 25 support)
+- Paper API dependency uses new version format: `[26.1.2.build,)`
+
+#### Resource Pack
+- **Removed built-in resource pack sending** — pack is now a separate download on [Modrinth](https://modrinth.com/resourcepack/bs-banhammer-resource-pack)
+- Removed `ResourcePackSender`, `ResourcePackListener`, and all `resourcePack.*` config options
+- Added clickable join hint for staff (`resourcePackHint.enabled: true` in config, disable if not needed)
+
+#### Update Checker
+- Game version filter (from v3.1.1) ensures 1.21.x users don't see 4.0.0 updates
+
+---
+
 ## [3.1.1] - 2026-05-02
 
 ### 🔧 Improvement

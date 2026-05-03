@@ -38,13 +38,6 @@ public final class Settings {
     private double knockbackHorizontal;
     private double knockbackVertical;
 
-    private boolean rpEnabled;
-    private String rpUrl;
-    private String rpHash;
-    private String rpPrompt;
-    private boolean rpForce;
-    private boolean rpSendOnJoin;
-    private int rpDelayTicks;
 
     public void reload() {
         plugin.reloadConfig();
@@ -73,13 +66,6 @@ public final class Settings {
         knockbackHorizontal = c.getDouble("effects.knockback.horizontal", 0.8);
         knockbackVertical = c.getDouble("effects.knockback.vertical", 0.35);
 
-        rpEnabled = c.getBoolean("resourcePack.enabled", true);
-        rpUrl = c.getString("resourcePack.url", "");
-        rpHash = c.getString("resourcePack.hash", "");
-        rpPrompt = c.getString("resourcePack.prompt", "Dieses Pack liefert die BanHammer-Textur. Akzeptieren?");
-        rpForce = c.getBoolean("resourcePack.force", false);
-        rpSendOnJoin = c.getBoolean("resourcePack.sendOnJoin", true);
-        rpDelayTicks = Math.max(0, c.getInt("resourcePack.delayTicks", 40));
     }
 
     // getters
@@ -106,11 +92,4 @@ public final class Settings {
     public double knockbackHorizontal() { return knockbackHorizontal; }
     public double knockbackVertical() { return knockbackVertical; }
 
-    public boolean rpEnabled() { return rpEnabled; }
-    public String rpUrl() { return rpUrl; }
-    public String rpHash() { return rpHash; }
-    public String rpPrompt() { return rpPrompt; }
-    public boolean rpForce() { return rpForce; }
-    public boolean rpSendOnJoin() { return rpSendOnJoin; }
-    public int rpDelayTicks() { return rpDelayTicks; }
 }

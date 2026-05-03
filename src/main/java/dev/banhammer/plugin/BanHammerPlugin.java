@@ -30,7 +30,6 @@ public class BanHammerPlugin extends JavaPlugin {
     private Settings settings;
     private Messages messages;
     private NamespacedKey pdcKey;
-    private dev.banhammer.plugin.util.ResourcePackSender resourcePackSender;
 
     // New 3.0 components
     private Database database;
@@ -68,8 +67,7 @@ public class BanHammerPlugin extends JavaPlugin {
 
         settings = new Settings(this);
         messages = new Messages(this);
-        resourcePackSender = new dev.banhammer.plugin.util.ResourcePackSender(this);
-        pdcKey = new NamespacedKey(this, "ban_hammer");
+pdcKey = new NamespacedKey(this, "ban_hammer");
 
         // Initialize database if enabled (async to prevent blocking main thread)
         if (getConfig().getBoolean("database.enabled", false)) {
@@ -102,7 +100,7 @@ public class BanHammerPlugin extends JavaPlugin {
 
         // Register events
         getServer().getPluginManager().registerEvents(new HammerListener(this), this);
-        getServer().getPluginManager().registerEvents(new dev.banhammer.plugin.listener.ResourcePackListener(this), this);
+        getServer().getPluginManager().registerEvents(new dev.banhammer.plugin.listener.JoinNotificationListener(this), this);
 
         // Register mute listener if mute system is enabled
         if (getConfig().getBoolean("punishmentTypes.mute.enabled", true)) {
@@ -144,7 +142,7 @@ public class BanHammerPlugin extends JavaPlugin {
         Objects.requireNonNull(getCommand("mute")).setTabCompleter(punishCmd);
         Objects.requireNonNull(getCommand("jail")).setTabCompleter(punishCmd);
 
-        getSLF4JLogger().info("BanHammer v3.1.1 enabled successfully!");
+        getSLF4JLogger().info("BanHammer v4.0.0 enabled successfully!");
     }
 
     @Override
@@ -475,7 +473,4 @@ public class BanHammerPlugin extends JavaPlugin {
         return updateChecker;
     }
 
-    public dev.banhammer.plugin.util.ResourcePackSender resourcePackSender() {
-        return resourcePackSender;
-    }
 }

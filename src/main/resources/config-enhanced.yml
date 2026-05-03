@@ -41,14 +41,11 @@ effects:
     vertical: 0.35
 
 # ===== RESOURCE PACK =====
-resourcePack:
+# The BanHammer resource pack is available as a separate download:
+# https://modrinth.com/resourcepack/bs-banhammer-resource-pack
+resourcePackHint:
+  # Show a clickable download hint to staff on join
   enabled: true
-  url: ""
-  hash: ""
-  prompt: "Dieses Pack liefert die BanHammer-Textur. Akzeptieren?"
-  force: false
-  sendOnJoin: true
-  delayTicks: 40
 
 # ===== DATABASE CONFIGURATION =====
 database:

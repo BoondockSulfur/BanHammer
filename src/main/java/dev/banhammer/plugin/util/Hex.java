@@ -3,6 +3,18 @@ package dev.banhammer.plugin.util;
 public final class Hex {
     private Hex() {}
 
+    private static final char[] HEX_CHARS = "0123456789abcdef".toCharArray();
+
+    public static String encodeHex(byte[] bytes) {
+        char[] hex = new char[bytes.length * 2];
+        for (int i = 0; i < bytes.length; i++) {
+            int v = bytes[i] & 0xFF;
+            hex[i * 2] = HEX_CHARS[v >>> 4];
+            hex[i * 2 + 1] = HEX_CHARS[v & 0x0F];
+        }
+        return new String(hex);
+    }
+
     public static byte[] decodeHex(String hex) {
         String s = hex.trim();
         if (s.startsWith("0x") || s.startsWith("0X")) s = s.substring(2);

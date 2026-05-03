@@ -1,12 +1,12 @@
-# BanHammer 3.1.1 - Enhanced Edition
+# BanHammer 4.0.0 - Enhanced Edition
 
 <div align="center">
 
-**The ultimate ban hammer for Paper & Folia 1.21.x servers with extended moderation features**
+**The ultimate ban hammer for Paper & Folia 26.1.x servers with extended moderation features**
 
-[![Minecraft Version](https://img.shields.io/badge/Minecraft-1.21.x-brightgreen.svg)](https://papermc.io/)
+[![Minecraft Version](https://img.shields.io/badge/Minecraft-26.1.x-brightgreen.svg)](https://papermc.io/)
 [![Folia Support](https://img.shields.io/badge/Folia-Supported-blue.svg)](https://papermc.io/software/folia)
-[![Java Version](https://img.shields.io/badge/Java-21-orange.svg)](https://adoptium.net/)
+[![Java Version](https://img.shields.io/badge/Java-25-orange.svg)](https://adoptium.net/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -16,6 +16,7 @@
 ## 📋 Table of Contents
 
 - [Overview](#overview)
+- [Resource Pack](#resource-pack)
 - [Features](#features)
 - [Installation](#installation)
 - [Commands](#commands)
@@ -23,7 +24,6 @@
 - [Configuration](#configuration)
 - [Database](#database)
 - [Discord Integration](#discord-integration)
-- [API](#api)
 - [Events](#events)
 - [FAQ](#faq)
 
@@ -33,7 +33,8 @@
 
 BanHammer is a powerful moderation plugin for Minecraft Paper servers that provides a special "Ban Hammer" item. With this, administrators can ban or kick players in a dramatic and entertaining way - including lightning, particles, and sound effects!
 
-**Version 3.1.1** brings massive enhancements:
+**Version 4.0.0** brings massive enhancements:
+- ✅ **Paper 26.1.x Support** - Fully modernized for the new Minecraft versioning
 - ✅ **Folia Support** - Dual-compatible with Paper and Folia from a single JAR
 - ✅ **Ban Presets System** - Quick switching between predefined ban types
 - ✅ **Kick/Jail Presets System** - Left-click preset cycling for kicks and jails
@@ -41,15 +42,28 @@ BanHammer is a powerful moderation plugin for Minecraft Paper servers that provi
 - ✅ Ban history with detailed tracking
 - ✅ Automatic unbanning for temporary bans
 - ✅ Discord integration with webhooks
-- ✅ REST API for web interfaces
 - ✅ IP banning support
 - ✅ Extended punishment types (Mute, Jail, Warnings)
 - ✅ Ban appeals system
 - ✅ Statistics and leaderboards
 - ✅ Multi-language support
 - ✅ Custom events for developers
-- ✅ Import/Export functions
-- ✅ Modrinth update checker
+- ✅ Modrinth update checker with game version filtering
+
+---
+
+## 🎨 Resource Pack
+
+The BanHammer texture pack is available as a **separate download**:
+
+➡️ **[BS-BanHammer Resource Pack on Modrinth](https://modrinth.com/resourcepack/bs-banhammer-resource-pack)**
+
+Staff members with the `banhammer.use` permission will see a clickable download hint on join. This can be disabled in `config.yml`:
+
+```yaml
+resourcePackHint:
+  enabled: false  # Set to false to disable the join hint
+```
 
 ---
 
@@ -57,7 +71,7 @@ BanHammer is a powerful moderation plugin for Minecraft Paper servers that provi
 
 ### 🔨 Core Features
 
-**Ban Presets System (NEW!):**
+**Ban Presets System:**
 - 🎯 **Shift + Right-Click:** Switch between predefined ban presets
 - 📊 **Actionbar Feedback:** Shows active preset when switching
 - 🔊 **Sound Feedback:** Individual sound per preset
@@ -65,7 +79,7 @@ BanHammer is a powerful moderation plugin for Minecraft Paper servers that provi
 - 📝 **Unlimited Presets:** Define your own ban categories
 - 🎨 **Fully Configurable:** Duration, reason, IP-ban, sound per preset
 
-**Kick/Jail Presets System (NEW!):**
+**Kick/Jail Presets System:**
 - 🎯 **Shift + Left-Click:** Switch between predefined kick/jail presets
 - 👊 **Left-Click on Player:** Execute kick or jail with active preset
 - 📊 **Actionbar Feedback:** Shows active kick/jail preset
@@ -172,13 +186,6 @@ presetSwitchCooldown: 250
 3. **Sound** is played
 4. **Right-Click on Player** → Ban with active preset
 
-**Features:**
-- Unlimited presets definable
-- Each preset with own duration, reason, IP-ban flag and sound
-- Cycle system: Automatically switches to next preset
-- Per-player tracking: Each player has their own active preset
-- Configurable switch cooldown against spam
-
 ### 👊 Kick/Jail Presets System
 
 Define preconfigured kick/jail types and switch between them quickly:
@@ -189,11 +196,6 @@ kickJailPresets:
     displayName: "Quick Kick"
     reason: "Kicked from server"
     # No duration = kick
-    sound: "BLOCK_NOTE_BLOCK_PLING"
-
-  warning_kick:
-    displayName: "Warning Kick"
-    reason: "Warning - kicked from server"
     sound: "BLOCK_NOTE_BLOCK_PLING"
 
   jail_10m:
@@ -221,13 +223,47 @@ kickJailPresets:
 3. **Sound** is played
 4. **Left-Click on Player** → Execute kick or jail with active preset
 
-**Features:**
-- Mix kicks and jails in one preset list (duration=null for kicks, set for jails)
-- Unlimited presets definable
-- Each preset with own duration, reason, and sound
-- Cycle system: Automatically switches to next preset
-- Per-player tracking: Each player has their own active preset
-- Same cooldown as ban preset switching
+### 🎭 Extended Punishment Types
+
+**Mute System:**
+```yaml
+punishmentTypes:
+  mute:
+    enabled: true
+    defaultDuration: "1h"
+    preventChat: true
+    preventCommands: true
+```
+
+**Jail System:**
+```yaml
+punishmentTypes:
+  jail:
+    enabled: true
+    preventTeleport: true
+    preventDamage: true
+```
+
+**Essentials Jail Integration:**
+- Soft dependency - no hard requirement
+- Automatically uses Essentials jails if available
+- Falls back to built-in jail system
+- Works with existing Essentials jail configurations
+
+Configure jail location:
+```bash
+# With Essentials: Configure in Essentials/jails.yml
+# Built-in: Use /setjail command in-game
+```
+
+**Warnings System:**
+```yaml
+punishmentTypes:
+  warnings:
+    enabled: true
+    autoBanThreshold: 3
+    autoBanDuration: "7d"
+```
 
 ### 🎨 Discord Integration
 
@@ -239,6 +275,9 @@ discord:
     bans: true
     kicks: true
     unbans: true
+    mutes: true
+    warnings: true
+    appeals: true
 ```
 
 **Features:**
@@ -262,79 +301,8 @@ updateChecker:
 - Automatic update checking on startup
 - Periodic checks (configurable interval)
 - Admin notifications on login (with permission)
-- Semantic version comparison
-- Download links and changelog URLs
-
-### 🌐 REST API
-
-```yaml
-api:
-  enabled: true
-  port: 8080
-  token: "your-secret-token"
-  rateLimit:
-    enabled: true
-    requestsPerMinute: 60
-```
-
-**Available Endpoints:**
-```
-GET  /api/v1/punishments/{id}              - Get single punishment
-GET  /api/v1/punishments/player/{uuid}     - Player history
-GET  /api/v1/punishments/active            - All active bans
-GET  /api/v1/statistics/staff              - Staff statistics
-GET  /api/v1/appeals/pending               - Pending appeals
-POST /api/v1/appeals/{id}/review           - Review appeal
-```
-
-### 🎭 Extended Punishment Types
-
-**Mute System:**
-```yaml
-punishmentTypes:
-  mute:
-    enabled: true
-    defaultDuration: "1h"
-    preventChat: true
-    preventCommands: true
-```
-
-**Jail System:**
-```yaml
-punishmentTypes:
-  jail:
-    enabled: true
-    preventTeleport: true
-    preventDamage: true
-```
-
-**Essentials Jail Integration (NEW!):**
-- **Soft Dependency:** Optional Essentials integration
-- **Preference System:** Uses Essentials jail if available, falls back to built-in
-- **Reflection-Based:** No hard dependency required
-- **Automatic Detection:** Checks for Essentials on startup
-- **Built-in Fallback:** Own jail system if Essentials not installed
-
-When Essentials is detected:
-1. Uses Essentials `/jail` system automatically
-2. Integrates with existing Essentials jails
-3. Teleports players to configured Essentials jail location
-4. Falls back to built-in jail if Essentials fails
-
-Configure jail location:
-```bash
-# With Essentials: Configure in Essentials/jails.yml
-# Built-in: Use /setjail command in-game
-```
-
-**Warnings System:**
-```yaml
-punishmentTypes:
-  warnings:
-    enabled: true
-    autoBanThreshold: 3
-    autoBanDuration: "7d"
-```
+- **Game version filtering** - 1.21.x users won't see 26.x updates and vice versa
+- Clickable download links
 
 ### 📝 Ban Appeals
 
@@ -350,18 +318,9 @@ Players can submit appeals with `/appeal <text>`, staff can review them with `/b
 
 ### 📈 Statistics & Leaderboards
 
-```yaml
-statistics:
-  enabled: true
-  leaderboards:
-    enabled: true
-    showTop: 10
-```
-
 - Tracking of all punishments per staff member
 - Leaderboard system
-- GUI view available
-- Exportable via API
+- GUI view available (`/bh gui`)
 
 ### 🌍 Multi-Language Support
 
@@ -372,8 +331,6 @@ language: "en"  # or "de"
 **Available Languages:**
 - 🇩🇪 **German (de)** - Vollständig übersetzt
 - 🇬🇧 **English (en)** - Fully translated
-
-Each language has its own message file (`messages_de.yml`, `messages_en.yml`) with all plugin messages, commands, and notifications.
 
 ### 🔌 Developer API
 
@@ -411,41 +368,22 @@ pm.getHistory(playerUuid, 50)
 ## 🚀 Installation
 
 1. **Requirements:**
-   - Paper or Folia Server 1.21.x or higher
-   - Java 21 or higher
+   - Paper or Folia Server 26.1.x or higher
+   - Java 25 or higher
    - Optional: MySQL Server (for MySQL mode)
+   - Optional: Essentials Plugin (for enhanced jail system)
 
 2. **Install Plugin:**
    ```bash
-   # Copy plugin JAR to plugins/ folder
-   cp banhammer-3.1.1.jar server/plugins/
-
-   # Start server
-   ./start.sh
+   cp banhammer-4.0.0.jar server/plugins/
    ```
 
-3. **Adjust Configuration:**
-   ```bash
-   # Edit config.yml
-   nano plugins/BanHammer/config.yml
+3. **Download Resource Pack (optional):**
+   - [BS-BanHammer Resource Pack](https://modrinth.com/resourcepack/bs-banhammer-resource-pack)
 
-   # For advanced features see config-enhanced.yml
-   ```
+4. **Start server** and adjust `plugins/BanHammer/config.yml`
 
-4. **Configure Resource Pack (Optional):**
-   ```yaml
-   # Edit plugins/BanHammer/config.yml
-   resourcePack:
-     plugin:
-       enabled: true
-       url: ""
-       hash: ""
-   ```
-
-   **Note:** The hash is the SHA-1 hash of the resource pack file. Generate it with:
-   ```bash
-   sha1sum resource-pack.zip
-   ``` 
+> **Looking for 1.21.x support?** Use [BanHammer v3.1.1](https://github.com/BoondockSulfur/BanHammer/releases/tag/v3.1.1) instead.
 
 ---
 
@@ -455,11 +393,11 @@ pm.getHistory(playerUuid, 50)
 |---------|-------------|------------|
 | `/banhammer` | Main command, shows help | `banhammer.command` |
 | `/bh give <player>` | Give BanHammer to player | `banhammer.give` |
-| `/bh reload` | Reload config (reinitializes Discord & Database) | `banhammer.reload` |
-| `/bh pack` | Send resource pack manually | `banhammer.command` |
+| `/bh reload` | Reload config (reinitializes Discord & DB) | `banhammer.reload` |
 | `/bh history <player> [page]` | Show punishment history | `banhammer.history` |
 | `/bh unban <player> [reason]` | Unban a player | `banhammer.unban` |
 | `/bh stats [player]` | Show statistics | `banhammer.stats` |
+| `/bh gui` | Open statistics GUI | `banhammer.stats` |
 | `/bh appeals` | Show pending appeals | `banhammer.appeals` |
 | `/bh approve <id> [response]` | Approve appeal | `banhammer.appeals.review` |
 | `/bh deny <id> [response]` | Deny appeal | `banhammer.appeals.review` |
@@ -468,7 +406,7 @@ pm.getHistory(playerUuid, 50)
 | `/unmute <player> [reason]` | Unmute a player | `banhammer.mute` |
 | `/jail <player> <duration> [reason]` | Jail a player | `banhammer.jail` |
 | `/unjail <player> [reason]` | Release from jail | `banhammer.jail` |
-| `/setjail` | Set jail location | `banhammer.jail` |
+| `/setjail` | Set jail location | `banhammer.setjail` |
 | `/warn <player> [reason]` | Warn a player | `banhammer.warn` |
 
 **Alias:** `/bh` is shorthand for `/banhammer`
@@ -494,6 +432,7 @@ pm.getHistory(playerUuid, 50)
 | `banhammer.ipban` | Can issue IP bans | op |
 | `banhammer.mute` | Can mute players | op |
 | `banhammer.jail` | Can jail players | op |
+| `banhammer.setjail` | Can set jail location | op |
 | `banhammer.warn` | Can warn players | op |
 | `banhammer.updatenotify` | Receive update notifications | op |
 
@@ -549,12 +488,6 @@ tempBans:
   enabled: true
   checkInterval: 60
 
-# REST API
-api:
-  enabled: true
-  port: 8080
-  token: "secret"
-
 # Appeals system
 appeals:
   enabled: true
@@ -564,6 +497,10 @@ appeals:
 updateChecker:
   enabled: true
   checkInterval: 6
+
+# Resource pack join hint
+resourcePackHint:
+  enabled: true
 ```
 
 ---
@@ -603,42 +540,6 @@ database:
 - Better performance with many entries
 - External access possibilities
 
-### Database Schema
-
-**punishments Table:**
-```sql
-- id (INT, PK, AUTO_INCREMENT)
-- victim_uuid (VARCHAR)
-- victim_name (VARCHAR)
-- victim_ip (VARCHAR, optional)
-- staff_uuid (VARCHAR)
-- staff_name (VARCHAR)
-- type (VARCHAR) - BAN, KICK, MUTE, etc.
-- reason (TEXT)
-- issued_at (BIGINT)
-- expires_at (BIGINT, nullable)
-- active (BOOLEAN)
-- unban_staff_uuid (VARCHAR, nullable)
-- unban_reason (TEXT, nullable)
-- unbanned_at (BIGINT, nullable)
-- server_name (VARCHAR)
-```
-
-**appeals Table:**
-```sql
-- id (INT, PK, AUTO_INCREMENT)
-- punishment_id (INT, FK)
-- player_uuid (VARCHAR)
-- player_name (VARCHAR)
-- appeal_text (TEXT)
-- submitted_at (BIGINT)
-- status (VARCHAR) - PENDING, APPROVED, DENIED
-- reviewed_by (VARCHAR, nullable)
-- reviewer_name (VARCHAR, nullable)
-- review_response (TEXT, nullable)
-- reviewed_at (BIGINT, nullable)
-```
-
 ---
 
 ## 💬 Discord Integration
@@ -677,52 +578,6 @@ database:
 
 ---
 
-## 🔌 API
-
-### Authentication
-
-All API requests require an Authorization header:
-
-```bash
-curl -H "Authorization: Bearer your-secret-token" \
-     http://localhost:8080/api/v1/punishments/active
-```
-
-### Example Requests
-
-**Get Player History:**
-```bash
-curl -H "Authorization: Bearer TOKEN" \
-     http://localhost:8080/api/v1/punishments/player/UUID
-```
-
-**Active Bans:**
-```bash
-curl -H "Authorization: Bearer TOKEN" \
-     http://localhost:8080/api/v1/punishments/active
-```
-
-**Staff Statistics:**
-```bash
-curl -H "Authorization: Bearer TOKEN" \
-     http://localhost:8080/api/v1/statistics/staff
-```
-
-### Rate Limiting
-
-Default: 60 requests per minute
-
-```yaml
-api:
-  rateLimit:
-    enabled: true
-    requestsPerMinute: 60
-```
-
-When exceeded: HTTP 429 (Too Many Requests)
-
----
-
 ## 🎪 Events
 
 ### For Plugin Developers
@@ -754,9 +609,7 @@ public void onPunish(PlayerPunishEvent event) {
 public void onPunished(PlayerPunishedEvent event) {
     PunishmentRecord record = event.getRecord();
     String victim = event.getVictimName();
-
-    // After successful punishment
-    // Perform own actions
+    // Perform own actions after punishment
 }
 ```
 
@@ -766,11 +619,7 @@ public void onPunished(PlayerPunishedEvent event) {
 public void onUnpunished(PlayerUnpunishedEvent event) {
     PunishmentRecord record = event.getRecord();
     boolean automatic = event.isAutomatic();
-
-    // Was automatically unbanned?
-    if (automatic) {
-        // Temporary ban expired
-    }
+    // Was automatically unbanned (temp ban expired)?
 }
 ```
 
@@ -803,7 +652,7 @@ ban:
 <details>
 <summary><b>Does it work with Folia?</b></summary>
 
-Yes! Since version 3.1.1, BanHammer fully supports Folia. The plugin automatically detects whether it's running on Paper or Folia at startup and uses the correct scheduler APIs. No configuration needed — just use the same JAR on both platforms.
+Yes! BanHammer fully supports Folia. The plugin automatically detects whether it's running on Paper or Folia at startup and uses the correct scheduler APIs. No configuration needed — just use the same JAR on both platforms.
 </details>
 
 <details>
@@ -819,38 +668,18 @@ database:
 </details>
 
 <details>
-<summary><b>How do I import bans from other plugins?</b></summary>
-
-Enable import in config:
-```yaml
-importExport:
-  enableImport: true
-  importFrom: "LiteBans"  # or AdvancedBan, BanManager
-```
-
-Then: `/bh import`
-</details>
-
-<details>
 <summary><b>Can I use the plugin without a database?</b></summary>
 
 Yes! Simply set `database.enabled: false`. The plugin will then only use Minecraft's built-in ban system. Features like history, statistics, and appeals won't be available.
 </details>
 
 <details>
-<summary><b>How do I customize the effects?</b></summary>
+<summary><b>Where is the resource pack?</b></summary>
 
-All effects are configurable in config.yml:
-```yaml
-effects:
-  lightning: true      # Lightning effect
-  sound: true          # Thunder/explosion sounds
-  particles: true      # Particle effects
-  knockback:
-    enabled: false     # Knockback
-    horizontal: 0.8
-    vertical: 0.35
-```
+The resource pack is available as a separate download on Modrinth:
+[BS-BanHammer Resource Pack](https://modrinth.com/resourcepack/bs-banhammer-resource-pack)
+
+You can also configure it via `server.properties` to auto-send it to players.
 </details>
 
 <details>
@@ -858,58 +687,13 @@ effects:
 
 The preset system allows quick switching between ban types:
 
-1. **Define presets** in `config.yml`:
-```yaml
-presets:
-  warning:
-    displayName: "Warning Ban"
-    duration: "1h"
-    reason: "First warning"
-    ipBan: false
-    sound: "BLOCK_NOTE_BLOCK_PLING"
-```
+1. **Define presets** in `config.yml`
+2. **Shift + Right-Click** with hammer → Switches ban preset
+3. **Shift + Left-Click** with hammer → Switches kick/jail preset
+4. **Right-Click on Player** → Ban with active preset
+5. **Left-Click on Player** → Kick/jail with active preset
 
-2. **Use in-game:**
-   - **Shift + Right-Click** with hammer → Switches preset
-   - Actionbar shows current preset
-   - **Right-Click on Player** → Ban with active preset
-
-3. **Advantages:**
-   - No commands needed
-   - Quick switching between ban types
-   - Visual feedback (actionbar + sound)
-   - Each staff has their own active preset
-</details>
-
-<details>
-<summary><b>How does the kick/jail preset system work?</b></summary>
-
-The kick/jail preset system works similar to ban presets:
-
-1. **Define presets** in `config.yml`:
-```yaml
-kickJailPresets:
-  quick_kick:
-    displayName: "Quick Kick"
-    reason: "Kicked"
-    # No duration = kick
-
-  jail_30m:
-    displayName: "30 Min Jail"
-    reason: "Jailed"
-    duration: "30m"  # Has duration = jail
-```
-
-2. **Use in-game:**
-   - **Shift + Left-Click** with hammer → Switches kick/jail preset
-   - Actionbar shows current preset
-   - **Left-Click on Player** → Execute kick or jail with active preset
-
-3. **Advantages:**
-   - Mix kicks and jails in one list
-   - Duration null = kick, duration set = jail
-   - Same quick switching as ban presets
-   - Separate tracking from ban presets
+Each staff member has their own active preset with visual and audio feedback.
 </details>
 
 ---
@@ -940,26 +724,14 @@ Contributions are welcome! Please:
 
 ---
 
-## 🎉 Credits
+## 🙏 Credits
 
-**Developed with ❤️ for the Minecraft community**
-
-- Original concept & base implementation
-- Enhanced features & database system
-- Discord & API integration
-- Event system for developers
+- **Plugin Development:** [BoondockSulfur](https://github.com/BoondockSulfur)
+- **Resource Pack:** [BS-BanHammer Resource Pack](https://modrinth.com/resourcepack/bs-banhammer-resource-pack)
 
 **Dependencies:**
 - [Paper API](https://papermc.io/)
 - [HikariCP](https://github.com/brettwooldridge/HikariCP)
 - [Discord Webhooks](https://github.com/MinnDevelopment/discord-webhooks)
-- [Javalin](https://javalin.io/)
 - [Gson](https://github.com/google/gson)
-
----
-
-<div align="center">
-
-
-
-</div>
+- [Adventure](https://github.com/KyoriPowered/adventure)

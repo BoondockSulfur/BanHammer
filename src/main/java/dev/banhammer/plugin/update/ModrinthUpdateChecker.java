@@ -6,6 +6,9 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dev.banhammer.plugin.BanHammerPlugin;
 import dev.banhammer.plugin.util.FoliaScheduler;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
@@ -26,7 +29,7 @@ import java.util.concurrent.TimeUnit;
 public class ModrinthUpdateChecker {
 
     private static final String MODRINTH_API = "https://api.modrinth.com/v2/project/%s/version";
-    private static final String USER_AGENT = "BanHammer/3.1.1 (GitHub)";
+    private static final String USER_AGENT = "BanHammer/4.0.0 (GitHub)";
 
     private final BanHammerPlugin plugin;
     private final String projectId;
@@ -302,9 +305,7 @@ public class ModrinthUpdateChecker {
         FoliaScheduler.runGlobal(plugin, () -> {
             for (Player player : Bukkit.getOnlinePlayers()) {
                 if (player.hasPermission("banhammer.updatenotify")) {
-                    player.sendMessage("§8[§6BanHammer§8] §aUpdate available: §e" + currentVersion + " §7→ §a" + latestVersion);
-                    player.sendMessage("§8[§6BanHammer§8] §7Download: §b" + downloadUrl);
-                    player.sendMessage("§8[§6BanHammer§8] §7Changelog: §9§n" + changelogUrl);
+                    sendUpdateMessage(player);
                 }
             }
         });
@@ -318,8 +319,26 @@ public class ModrinthUpdateChecker {
         if (!player.hasPermission("banhammer.updatenotify")) return;
         if (latestVersion == null || !isNewerVersion(latestVersion)) return;
 
-        player.sendMessage("§8[§6BanHammer§8] §aUpdate available: §e" + currentVersion + " §7→ §a" + latestVersion);
-        player.sendMessage("§8[§6BanHammer§8] §7Download: §b" + downloadUrl);
+        sendUpdateMessage(player);
+    }
+
+    private void sendUpdateMessage(Player player) {
+        Component prefix = Component.text("[", NamedTextColor.DARK_GRAY)
+                .append(Component.text("BanHammer", NamedTextColor.GOLD))
+                .append(Component.text("] ", NamedTextColor.DARK_GRAY));
+
+        player.sendMessage(prefix
+                .append(Component.text("Update available: ", NamedTextColor.GREEN))
+                .append(Component.text(currentVersion, NamedTextColor.YELLOW))
+                .append(Component.text(" → ", NamedTextColor.GRAY))
+                .append(Component.text(latestVersion, NamedTextColor.GREEN)));
+
+        if (downloadUrl != null) {
+            player.sendMessage(prefix
+                    .append(Component.text("Download: ", NamedTextColor.GRAY))
+                    .append(Component.text(downloadUrl, NamedTextColor.AQUA)
+                            .clickEvent(ClickEvent.openUrl(downloadUrl))));
+        }
     }
 
     public String getLatestVersion() {

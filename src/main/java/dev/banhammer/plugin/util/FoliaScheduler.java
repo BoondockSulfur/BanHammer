@@ -164,7 +164,7 @@ public final class FoliaScheduler {
             player.getScheduler().run(plugin, scheduledTask -> player.kick(
                     Component.text(reason != null ? reason : "")), null);
         } else {
-            player.kickPlayer(reason != null ? reason : "");
+            player.kick(Component.text(reason != null ? reason : ""));
         }
     }
 

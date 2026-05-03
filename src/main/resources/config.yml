@@ -49,14 +49,11 @@ effects:
     vertical: 0.35
 
 # ===== RESOURCE PACK =====
-resourcePack:
+# The BanHammer resource pack is available as a separate download:
+# https://modrinth.com/resourcepack/bs-banhammer-resource-pack
+resourcePackHint:
+  # Show a clickable download hint to staff on join
   enabled: true
-  url: "https://github.com/ELITEK3V/Ban-Hammer-Pack-/raw/refs/heads/main/an_Hammer1.21.x.zip"
-  hash: "c8aeaa1bb7af7090c068368d7ee8393f82c2a501"
-  prompt: "This pack provides the BanHammer texture. Accept?"
-  force: false
-  sendOnJoin: true
-  delayTicks: 40
 
 # ===== DATABASE (NEW in 3.0) =====
 # Enables ban history tracking, statistics, and more

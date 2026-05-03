@@ -310,7 +310,7 @@ public class StatisticsGUI {
             case BAN, TEMP_BAN, IP_BAN -> Material.IRON_BARS;
             case KICK -> Material.IRON_DOOR;
             case MUTE, TEMP_MUTE -> Material.PINK_CANDLE;
-            case JAIL -> Material.CHAIN;
+            case JAIL -> Material.IRON_BARS;
             case WARNING -> Material.YELLOW_BANNER;
             default -> Material.PAPER;
         };

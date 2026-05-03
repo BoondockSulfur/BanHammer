@@ -5,7 +5,6 @@ import dev.banhammer.plugin.database.Database;
 import dev.banhammer.plugin.database.model.AppealRecord;
 import dev.banhammer.plugin.database.model.PunishmentRecord;
 import dev.banhammer.plugin.database.model.PunishmentType;
-import dev.banhammer.plugin.util.Hex;
 import dev.banhammer.plugin.util.ItemFactory;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
@@ -15,7 +14,6 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabExecutor;
 import org.bukkit.entity.Player;
 
-import java.lang.reflect.Method;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -76,16 +74,6 @@ public class BanHammerCommand implements TabExecutor {
                 target.getInventory().addItem(ItemFactory.createHammer(plugin));
                 sender.sendMessage(plugin.messages().given(target.getName()));
             }
-            case "pack" -> {
-                if (!(sender instanceof Player player)) {
-                    sender.sendMessage(plugin.messages().notPlayer());
-                    return true;
-                }
-                plugin.resourcePackSender().sendPreferredPack(player);
-                sender.sendMessage(plugin.messages().prefix()
-                        .append(Component.text(" "))
-                        .append(plugin.messages().resourcepackSent()));
-            }
             case "history" -> handleHistory(sender, args);
             case "unban" -> handleUnban(sender, args);
             case "stats" -> handleStats(sender, args);
@@ -106,7 +94,6 @@ public class BanHammerCommand implements TabExecutor {
         if (args.length == 1) {
             if (sender.hasPermission("banhammer.reload")) out.add("reload");
             if (sender.hasPermission("banhammer.give")) out.add("give");
-            out.add("pack");
             if (sender.hasPermission("banhammer.history")) out.add("history");
             if (sender.hasPermission("banhammer.unban")) out.add("unban");
             if (sender.hasPermission("banhammer.stats")) out.add("stats");
@@ -167,9 +154,7 @@ public class BanHammerCommand implements TabExecutor {
             }
         }
 
-        @SuppressWarnings("deprecation")
-        OfflinePlayer target = Bukkit.getOfflinePlayer(targetName);
-        UUID targetUuid = target.getUniqueId();
+        UUID targetUuid = resolvePlayerUuid(targetName);
 
         int finalPage = page;
         plugin.getPunishmentManager().getHistory(targetUuid, 1000).thenAccept(history -> {
@@ -275,9 +260,7 @@ public class BanHammerCommand implements TabExecutor {
             return;
         }
 
-        @SuppressWarnings("deprecation")
-        OfflinePlayer target = Bukkit.getOfflinePlayer(targetName);
-        UUID targetUuid = target.getUniqueId();
+        UUID targetUuid = resolvePlayerUuid(targetName);
 
         plugin.getPunishmentManager().getHistory(targetUuid, 1000).thenAccept(history -> {
             int total = history.size();
@@ -497,5 +480,16 @@ public class BanHammerCommand implements TabExecutor {
             staff.sendMessage(plugin.messages().errorOccurred());
             return null;
         });
+    }
+
+    @SuppressWarnings("deprecation")
+    private UUID resolvePlayerUuid(String playerName) {
+        Player online = Bukkit.getPlayerExact(playerName);
+        if (online != null) return online.getUniqueId();
+
+        OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(playerName);
+        if (cached != null) return cached.getUniqueId();
+
+        return Bukkit.getOfflinePlayer(playerName).getUniqueId();
     }
 }
