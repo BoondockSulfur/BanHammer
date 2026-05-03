@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Passes `game_versions` parameter to Modrinth API to filter releases
 - **Why:** Prepares for Paper 26.x support — 1.21.x users won't receive update notifications for incompatible 26.x releases (and vice versa)
 
+#### Metrics
+- Added [bStats](https://bstats.org) integration (Plugin ID: 31076)
+
 ---
 
 ## [3.1.0] - 2026-04-24

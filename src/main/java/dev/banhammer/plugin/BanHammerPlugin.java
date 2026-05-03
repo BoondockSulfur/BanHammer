@@ -47,6 +47,9 @@ public class BanHammerPlugin extends JavaPlugin {
     public void onEnable() {
         instance = this;
 
+        // bStats Metrics
+        new org.bstats.bukkit.Metrics(this, 31076);
+
         // Detect Folia vs Paper
         dev.banhammer.plugin.util.FoliaScheduler.init();
         if (dev.banhammer.plugin.util.FoliaScheduler.isFolia()) {
