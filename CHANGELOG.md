@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed `ResourcePackSender`, `ResourcePackListener`, and all `resourcePack.*` config options
 - Added clickable join hint for staff (`resourcePackHint.enabled: true` in config, disable if not needed)
 
+#### Metrics
+- Added [bStats](https://bstats.org) integration (Plugin ID: 31076)
+
 #### Update Checker
 - Game version filter (from v3.1.1) ensures 1.21.x users don't see 4.0.0 updates
 
