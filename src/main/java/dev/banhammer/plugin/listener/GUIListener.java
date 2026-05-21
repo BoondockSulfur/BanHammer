@@ -45,6 +45,9 @@ public class GUIListener implements Listener {
         }
 
         Component itemName = event.getCurrentItem().getItemMeta().displayName();
+        if (itemName == null) {
+            return; // Item without a display name cannot match any of our buttons
+        }
         String itemNameText = PlainTextComponentSerializer.plainText().serialize(itemName);
 
         // Main menu

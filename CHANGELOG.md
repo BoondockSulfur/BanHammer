@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.1.2] - 2026-05-21
+
+### 🐛 Bug Fixes
+
+Backport of the 4.0.1 fixes to the 1.21.x line.
+
+#### Jail System
+- **Fixed jail escape via relogging** — jailed players are now re-enforced on join (`JailListener#onJoin` → `JailManager#restoreJailOnJoin`). Previously the enforcement cache was cleared on quit and never restored.
+- **Fixed jails not surviving server restarts** — `loadJailedPlayers()` now runs in `initializeDatabaseDependentComponents()` after the (asynchronous) database is ready, instead of during `onEnable` when it was still `null`.
+- **`/unjail` now works for offline players** — the database record is released even when the target is not online.
+
+#### Punishments / IP Bans
+- **Fixed IP-ban removal with anonymization enabled** — `/unban` no longer attempts to pardon an anonymized IP. The real IP is only pardoned when `privacy.ipAnonymization: NONE`; otherwise a hint to use the vanilla `/pardon-ip` is logged. Applied to both manual unban and the auto-unban scheduler.
+- **Muted players can no longer bypass chat blocking via namespaced commands** (e.g. `/minecraft:msg`).
+
+#### Presets
+- **Fixed memory leak** — per-player preset selections are now cleared on quit.
+- **Thread-safety** — preset lists are immutable snapshots swapped atomically on reload, preventing a possible `ArithmeticException` (modulo by zero) if a player cycled presets during `/bh reload`.
+- **Modernized sound resolution** — new registry-based `Sounds` utility resolves both namespaced keys (`block.note_block.pling`) and legacy constants (`BLOCK_NOTE_BLOCK_PLING`).
+
+#### Stability / Logging
+- Removed noisy `INFO`-level debug logging from the jail, hammer-use, ban and Discord code paths (now `debug`).
+- `ModrinthUpdateChecker` shared fields are now `volatile` for correct visibility between the async check and the main thread.
+- `GUIListener` no longer risks a `NullPointerException` on inventory items without a display name.
+
+---
+
 ## [3.1.1] - 2026-05-02
 
 ### 🔧 Improvement

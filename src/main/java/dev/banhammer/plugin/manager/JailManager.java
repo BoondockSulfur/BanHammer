@@ -1,6 +1,8 @@
 package dev.banhammer.plugin.manager;
 
 import dev.banhammer.plugin.BanHammerPlugin;
+import dev.banhammer.plugin.database.Database;
+import dev.banhammer.plugin.database.model.PunishmentRecord;
 import dev.banhammer.plugin.database.model.PunishmentType;
 import dev.banhammer.plugin.integration.EssentialsJailIntegration;
 import dev.banhammer.plugin.util.FoliaScheduler;
@@ -9,6 +11,7 @@ import org.bukkit.Location;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.entity.Player;
 
+import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -279,6 +282,52 @@ public class JailManager {
                     });
             });
         }
+    }
+
+    /**
+     * Restores a player's jail status when they (re)join the server.
+     * Without this, a jailed player escapes enforcement simply by relogging
+     * (their enforcement cache entry is cleared on quit), and jails do not
+     * survive a server restart.
+     *
+     * @param player The joining player
+     */
+    public void restoreJailOnJoin(Player player) {
+        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
+            return;
+        }
+
+        UUID uuid = player.getUniqueId();
+        if (jailedPlayers.containsKey(uuid)) {
+            return; // Already tracked this session
+        }
+
+        Database database = plugin.getDatabase();
+        if (database == null) {
+            return;
+        }
+
+        database.getActivePunishmentsByType(uuid, PunishmentType.JAIL).thenAccept(punishments -> {
+            PunishmentRecord active = punishments.stream()
+                    .filter(p -> p.getExpiresAt() == null || p.getExpiresAt().isAfter(Instant.now()))
+                    .findFirst()
+                    .orElse(null);
+
+            // Not jailed, or jail already expired (the UnbanScheduler will clean it up)
+            if (active == null) {
+                return;
+            }
+
+            // Re-apply the jail on the player's region/main thread
+            FoliaScheduler.runOnEntity(plugin, player, () -> {
+                if (player.isOnline() && !jailedPlayers.containsKey(uuid)) {
+                    jailPlayer(player);
+                }
+            });
+        }).exceptionally(throwable -> {
+            plugin.getSLF4JLogger().error("Failed to restore jail status for {}", player.getName(), throwable);
+            return null;
+        });
     }
 
     /**

@@ -115,8 +115,9 @@ public class BanHammerPlugin extends JavaPlugin {
         // Register jail listener if jail system is enabled
         if (getConfig().getBoolean("punishmentTypes.jail.enabled", true)) {
             getServer().getPluginManager().registerEvents(new dev.banhammer.plugin.listener.JailListener(this), this);
-            // Load jailed players
-            jailManager.loadJailedPlayers();
+            // Note: already-online jailed players are restored in
+            // initializeDatabaseDependentComponents() once the database is ready;
+            // (re)joining players are restored per-player via JailListener#onJoin.
         }
 
         // Initialize statistics GUI
@@ -147,7 +148,7 @@ public class BanHammerPlugin extends JavaPlugin {
         Objects.requireNonNull(getCommand("mute")).setTabCompleter(punishCmd);
         Objects.requireNonNull(getCommand("jail")).setTabCompleter(punishCmd);
 
-        getSLF4JLogger().info("BanHammer v3.1.1 enabled successfully!");
+        getSLF4JLogger().info("BanHammer v3.1.2 enabled successfully!");
     }
 
     @Override
@@ -243,6 +244,12 @@ public class BanHammerPlugin extends JavaPlugin {
 
         // Load active mutes into cache
         punishmentManager.loadActiveMutes();
+
+        // Restore jailed players that are already online (e.g. after a /reload).
+        // The database was not ready when onEnable ran, so this must happen here.
+        if (getConfig().getBoolean("punishmentTypes.jail.enabled", true)) {
+            jailManager.loadJailedPlayers();
+        }
 
         // Initialize auto-unban scheduler if enabled
         if (getConfig().getBoolean("tempBans.enabled", true)) {

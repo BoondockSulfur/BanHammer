@@ -7,6 +7,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
@@ -133,6 +134,13 @@ public class JailListener implements Listener {
             event.setCancelled(true);
             player.sendMessage(plugin.messages().jailNoCommands());
         }
+    }
+
+    @EventHandler
+    public void onJoin(PlayerJoinEvent event) {
+        // Restore jail enforcement for players who are still jailed.
+        // Prevents escaping jail by relogging and restores jails after a restart.
+        plugin.getJailManager().restoreJailOnJoin(event.getPlayer());
     }
 
     @EventHandler

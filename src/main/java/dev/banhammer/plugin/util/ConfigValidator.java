@@ -131,12 +131,8 @@ public final class ConfigValidator {
             }
 
             String sound = config.getString("presets." + presetId + ".sound", "");
-            if (!sound.isEmpty()) {
-                try {
-                    org.bukkit.Sound.valueOf(sound);
-                } catch (IllegalArgumentException e) {
-                    warnings.add("Invalid sound in preset '" + presetId + "': " + sound);
-                }
+            if (!sound.isEmpty() && !Sounds.isValid(sound)) {
+                warnings.add("Invalid sound in preset '" + presetId + "': " + sound);
             }
         }
     }
@@ -155,12 +151,8 @@ public final class ConfigValidator {
             }
 
             String sound = config.getString("kickJailPresets." + presetId + ".sound", "");
-            if (!sound.isEmpty()) {
-                try {
-                    org.bukkit.Sound.valueOf(sound);
-                } catch (IllegalArgumentException e) {
-                    warnings.add("Invalid sound in kick/jail preset '" + presetId + "': " + sound);
-                }
+            if (!sound.isEmpty() && !Sounds.isValid(sound)) {
+                warnings.add("Invalid sound in kick/jail preset '" + presetId + "': " + sound);
             }
         }
     }

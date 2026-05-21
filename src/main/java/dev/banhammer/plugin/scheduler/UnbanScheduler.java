@@ -97,8 +97,12 @@ public class UnbanScheduler {
                     banList.pardon(record.getVictimName());
                 }
                 case IP_BAN -> {
-                    // Only pardon if victimIp is a valid IP address (not hashed)
-                    if (record.getVictimIp() != null && isValidIP(record.getVictimIp())) {
+                    // Only pardon when the REAL IP is stored (anonymization disabled).
+                    // With anonymization enabled (default) the stored value is anonymized/hashed;
+                    // temporary IP bans then expire automatically via the Minecraft ban list's
+                    // own expiry date, so no manual pardon is required here.
+                    String anonLevel = plugin.getConfig().getString("privacy.ipAnonymization", "PARTIAL").toUpperCase();
+                    if (anonLevel.equals("NONE") && record.getVictimIp() != null && isValidIP(record.getVictimIp())) {
                         BanList ipBanList = Bukkit.getBanList(BanList.Type.IP);
                         ipBanList.pardon(record.getVictimIp());
                     }
