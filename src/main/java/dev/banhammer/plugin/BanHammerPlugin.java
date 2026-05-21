@@ -113,8 +113,9 @@ pdcKey = new NamespacedKey(this, "ban_hammer");
         // Register jail listener if jail system is enabled
         if (getConfig().getBoolean("punishmentTypes.jail.enabled", true)) {
             getServer().getPluginManager().registerEvents(new dev.banhammer.plugin.listener.JailListener(this), this);
-            // Load jailed players
-            jailManager.loadJailedPlayers();
+            // Note: already-online jailed players are restored in
+            // initializeDatabaseDependentComponents() once the database is ready;
+            // (re)joining players are restored per-player via JailListener#onJoin.
         }
 
         // Initialize statistics GUI
@@ -145,7 +146,7 @@ pdcKey = new NamespacedKey(this, "ban_hammer");
         Objects.requireNonNull(getCommand("mute")).setTabCompleter(punishCmd);
         Objects.requireNonNull(getCommand("jail")).setTabCompleter(punishCmd);
 
-        getSLF4JLogger().info("BanHammer v4.0.0 enabled successfully!");
+        getSLF4JLogger().info("BanHammer v4.0.1 enabled successfully!");
     }
 
     @Override
@@ -241,6 +242,12 @@ pdcKey = new NamespacedKey(this, "ban_hammer");
 
         // Load active mutes into cache
         punishmentManager.loadActiveMutes();
+
+        // Restore jailed players that are already online (e.g. after a /reload).
+        // The database was not ready when onEnable ran, so this must happen here.
+        if (getConfig().getBoolean("punishmentTypes.jail.enabled", true)) {
+            jailManager.loadJailedPlayers();
+        }
 
         // Initialize auto-unban scheduler if enabled
         if (getConfig().getBoolean("tempBans.enabled", true)) {

@@ -78,14 +78,12 @@ public class DiscordWebhook {
      * @param record The punishment record
      */
     public void sendPunishment(PunishmentRecord record) {
-        logger.info("sendPunishment called - enabled: {}, client: {}", enabled, (client != null ? "present" : "null"));
-
         if (!enabled || client == null) {
-            logger.warn("Discord webhook not available - enabled: {}, client: {}", enabled, (client != null ? "present" : "null"));
+            logger.debug("Discord webhook not available - enabled: {}, client: {}", enabled, (client != null ? "present" : "null"));
             return;
         }
 
-        logger.info("Sending Discord notification for punishment: {} -> {}", record.getStaffName(), record.getVictimName());
+        logger.debug("Sending Discord notification for punishment: {} -> {}", record.getStaffName(), record.getVictimName());
 
         try {
             WebhookEmbedBuilder embed = new WebhookEmbedBuilder()

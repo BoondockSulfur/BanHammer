@@ -73,6 +73,12 @@ public class MuteListener implements Listener {
         String message = event.getMessage().toLowerCase();
         String command = message.split(" ")[0].replace("/", "");
 
+        // Strip plugin namespace so e.g. "/minecraft:msg" is treated as "msg"
+        int colon = command.indexOf(':');
+        if (colon >= 0) {
+            command = command.substring(colon + 1);
+        }
+
         // Check if command should be blocked
         if (!blockedCommands.contains(command)) {
             return;

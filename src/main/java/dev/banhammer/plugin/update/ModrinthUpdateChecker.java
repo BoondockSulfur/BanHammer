@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit;
 public class ModrinthUpdateChecker {
 
     private static final String MODRINTH_API = "https://api.modrinth.com/v2/project/%s/version";
-    private static final String USER_AGENT = "BanHammer/4.0.0 (GitHub)";
+    private static final String USER_AGENT = "BanHammer/4.0.1 (GitHub)";
 
     private final BanHammerPlugin plugin;
     private final String projectId;
@@ -41,10 +41,11 @@ public class ModrinthUpdateChecker {
     private final long checkInterval;
 
     private Object periodicTask;
-    private String latestVersion;
-    private String downloadUrl;
-    private String changelogUrl;
-    private long lastCheck = 0;
+    // Written on the async update-check thread, read on the main thread (join/notify)
+    private volatile String latestVersion;
+    private volatile String downloadUrl;
+    private volatile String changelogUrl;
+    private volatile long lastCheck = 0;
 
     public ModrinthUpdateChecker(BanHammerPlugin plugin) {
         this.plugin = plugin;

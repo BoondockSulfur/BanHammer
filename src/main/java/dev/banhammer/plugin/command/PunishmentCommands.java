@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Commands for extended punishment types: mute, jail, warn.
@@ -248,8 +249,11 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
 
         String playerName = args[0];
         Player target = plugin.getServer().getPlayer(playerName);
+        boolean databaseEnabled = plugin.getPunishmentManager().isDatabaseEnabled();
 
-        if (target == null) {
+        // Offline players can only be released when the database is available,
+        // because their jail status is persisted there.
+        if (target == null && !databaseEnabled) {
             sender.sendMessage(plugin.messages().prefix()
                     .append(Component.text(" "))
                     .append(plugin.messages().playerNotOnline())
@@ -258,7 +262,13 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
         }
 
         // Release from jail (works with both Essentials and built-in)
-        plugin.getJailManager().releasePlayer(target);
+        if (target != null) {
+            plugin.getJailManager().releasePlayer(target);
+        } else {
+            // Offline: clean up in-memory tracking by UUID; the DB record is handled below.
+            UUID uuid = Bukkit.getOfflinePlayer(playerName).getUniqueId();
+            plugin.getJailManager().releasePlayerByUUID(uuid);
+        }
 
         sender.sendMessage(plugin.messages().prefix()
                 .append(Component.text(" "))
@@ -266,7 +276,7 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
                 .color(NamedTextColor.GREEN));
 
         // If database is enabled, also update punishment record
-        if (plugin.getPunishmentManager().isDatabaseEnabled()) {
+        if (databaseEnabled) {
             String reason = args.length >= 2 ? String.join(" ", Arrays.copyOfRange(args, 1, args.length))
                     : "Freigelassen durch Staff";
 

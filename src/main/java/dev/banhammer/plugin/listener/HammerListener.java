@@ -5,6 +5,7 @@ import dev.banhammer.plugin.util.DurationParser;
 import dev.banhammer.plugin.util.ItemFactory;
 import dev.banhammer.plugin.util.Messages;
 import dev.banhammer.plugin.util.Settings;
+import dev.banhammer.plugin.util.Sounds;
 import org.bukkit.BanList;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -154,6 +155,9 @@ public final class HammerListener implements Listener {
         cooldowns.remove(uuid);
         switchCooldowns.remove(uuid);
         switchKickJailCooldowns.remove(uuid);
+        // Clean up per-player preset selection to prevent unbounded map growth
+        plugin.getPresetManager().resetPreset(uuid);
+        plugin.getPresetManager().resetKickJailPreset(uuid);
     }
 
     /* =========================
@@ -166,21 +170,15 @@ public final class HammerListener implements Listener {
 
     // „Kick/Jail-Flow" für Linksklick - verwendet aktuelles Kick/Jail-Preset
     private void handleKickUse(Player staff, Player victim) {
-        plugin.getSLF4JLogger().info("===== HANDLE KICK USE CALLED =====");
-        plugin.getSLF4JLogger().info("Staff: {}, Victim: {}", staff.getName(), victim.getName());
-
         if (!staff.hasPermission("banhammer.use")) {
-            plugin.getSLF4JLogger().warn("Staff {} has no banhammer.use permission!", staff.getName());
             return;
         }
 
         if (isOnCooldown(staff)) {
-            plugin.getSLF4JLogger().info("Staff {} is on cooldown", staff.getName());
             sendCompat(staff, messages.cooldown(cooldownRemaining(staff)));
             return;
         }
         if (!canPunish(staff, victim)) {
-            plugin.getSLF4JLogger().warn("Cannot punish {} (bypass or self-target)", victim.getName());
             sendCompat(staff, messages.cannotBan()); // vorhandene Msg wiederverwenden
             return;
         }
@@ -189,16 +187,13 @@ public final class HammerListener implements Listener {
         doFx(staff, victim);
 
         // Get active kick/jail preset
-        plugin.getSLF4JLogger().info("Getting active kick/jail preset for {}", staff.getName());
         dev.banhammer.plugin.preset.KickJailPreset preset = plugin.getPresetManager().getActiveKickJailPreset(staff.getUniqueId());
-        plugin.getSLF4JLogger().info("Active preset: {} (Type: {})", preset.getDisplayName(), preset.getType());
 
         // Use preset values
         String reason = preset.getReason();
         Duration dur = preset.getDuration();
 
-        // Debug log
-        plugin.getSLF4JLogger().info("Kick/Jail with preset '{}': {} ({})",
+        plugin.getSLF4JLogger().debug("Kick/Jail with preset '{}': {} ({})",
                 preset.getDisplayName(),
                 victim.getName(),
                 preset.getDurationDisplay());
@@ -262,8 +257,7 @@ public final class HammerListener implements Listener {
         Duration dur = preset.getDuration();
         boolean ipBan = preset.isIpBan();
 
-        // Debug log
-        plugin.getSLF4JLogger().info("Ban with preset '{}': {} ({}{})",
+        plugin.getSLF4JLogger().debug("Ban with preset '{}': {} ({}{})",
                 preset.getDisplayName(),
                 victim.getName(),
                 preset.getDurationDisplay(),
@@ -307,13 +301,11 @@ public final class HammerListener implements Listener {
         sendActionBar(staff, presetInfo);
 
         // Play sound
-        if (preset.getSound() != null && !preset.getSound().isEmpty()) {
-            try {
-                Sound sound = Sound.valueOf(preset.getSound());
-                staff.playSound(staff.getLocation(), sound, 0.7f, 1.0f);
-            } catch (IllegalArgumentException e) {
-                plugin.getSLF4JLogger().warn("Invalid sound for preset {}: {}", preset.getId(), preset.getSound());
-            }
+        Sound sound = Sounds.resolve(preset.getSound());
+        if (sound != null) {
+            staff.playSound(staff.getLocation(), sound, 0.7f, 1.0f);
+        } else if (preset.getSound() != null && !preset.getSound().isEmpty()) {
+            plugin.getSLF4JLogger().warn("Invalid sound for preset {}: {}", preset.getId(), preset.getSound());
         }
 
         plugin.getSLF4JLogger().debug("Player {} switched to preset: {}", staff.getName(), preset.getDisplayName());
@@ -340,13 +332,11 @@ public final class HammerListener implements Listener {
         sendActionBar(staff, presetInfo);
 
         // Play sound
-        if (preset.getSound() != null && !preset.getSound().isEmpty()) {
-            try {
-                Sound sound = Sound.valueOf(preset.getSound());
-                staff.playSound(staff.getLocation(), sound, 0.7f, 1.0f);
-            } catch (IllegalArgumentException e) {
-                plugin.getSLF4JLogger().warn("Invalid sound for kick/jail preset {}: {}", preset.getId(), preset.getSound());
-            }
+        Sound sound = Sounds.resolve(preset.getSound());
+        if (sound != null) {
+            staff.playSound(staff.getLocation(), sound, 0.7f, 1.0f);
+        } else if (preset.getSound() != null && !preset.getSound().isEmpty()) {
+            plugin.getSLF4JLogger().warn("Invalid sound for kick/jail preset {}: {}", preset.getId(), preset.getSound());
         }
 
         plugin.getSLF4JLogger().debug("Player {} switched to kick/jail preset: {}", staff.getName(), preset.getDisplayName());
@@ -425,12 +415,11 @@ public final class HammerListener implements Listener {
                 ? null
                 : Instant.now().plus(duration);
 
-        // Debug logging
         if (expires == null) {
-            plugin.getSLF4JLogger().info("Vanilla ban: PERMANENT ban for {}", victim.getName());
+            plugin.getSLF4JLogger().debug("Vanilla ban: PERMANENT ban for {}", victim.getName());
         } else {
             long seconds = java.time.Duration.between(Instant.now(), expires).getSeconds();
-            plugin.getSLF4JLogger().info("Vanilla ban: TEMPORARY ban for {} ({} seconds, expires at {})",
+            plugin.getSLF4JLogger().debug("Vanilla ban: TEMPORARY ban for {} ({} seconds, expires at {})",
                     victim.getName(), seconds, expires);
         }
 

@@ -270,10 +270,21 @@ public class PunishmentManager {
                                 .orElse(null);
 
                         if (record != null) {
-                            // Also remove IP ban if applicable
+                            // Also remove IP ban if applicable.
+                            // The stored victimIp is only the REAL IP when anonymization is
+                            // disabled. With anonymization enabled (default) the stored value is
+                            // anonymized/hashed and must not be passed to pardon() - the real IP
+                            // has to be removed via the vanilla /pardon-ip command instead.
                             if (record.getType() == PunishmentType.IP_BAN && record.getVictimIp() != null) {
-                                BanList ipBanList = Bukkit.getBanList(BanList.Type.IP);
-                                ipBanList.pardon(record.getVictimIp());
+                                String anonLevel = plugin.getConfig().getString("privacy.ipAnonymization", "PARTIAL").toUpperCase();
+                                if (anonLevel.equals("NONE")) {
+                                    BanList ipBanList = Bukkit.getBanList(BanList.Type.IP);
+                                    ipBanList.pardon(record.getVictimIp());
+                                } else {
+                                    plugin.getSLF4JLogger().warn("IP-Bann von {} kann nicht automatisch entfernt werden " +
+                                            "(IP anonymisiert: {}). Bitte /pardon-ip manuell verwenden.",
+                                            record.getVictimName(), anonLevel);
+                                }
                             }
 
                             return database.deactivatePunishment(record.getId(), staff.getUniqueId(), reason)
@@ -459,15 +470,14 @@ public class PunishmentManager {
      * @return CompletableFuture with the punishment record ID
      */
     public CompletableFuture<Integer> jailPlayer(Player staff, Player victim, String reason, Duration duration) {
-        plugin.getSLF4JLogger().info("===== JAIL PLAYER CALLED =====");
-        plugin.getSLF4JLogger().info("Staff: {}, Victim: {}, Reason: {}, Duration: {}",
-            staff.getName(), victim.getName(), reason, duration);
+        plugin.getSLF4JLogger().debug("Jailing {} (staff: {}, reason: {}, duration: {})",
+            victim.getName(), staff.getName(), reason, duration);
 
         PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, PunishmentType.JAIL, reason, duration);
         Bukkit.getPluginManager().callEvent(event);
 
         if (event.isCancelled()) {
-            plugin.getSLF4JLogger().warn("Jail event was cancelled!");
+            plugin.getSLF4JLogger().debug("Jail of {} was cancelled by another plugin", victim.getName());
             return CompletableFuture.completedFuture(-1);
         }
 
@@ -476,12 +486,9 @@ public class PunishmentManager {
         Instant expiresAt = finalDuration != null ? Instant.now().plus(finalDuration) : null;
 
         // Actually jail the player
-        plugin.getSLF4JLogger().info("Calling JailManager.jailPlayer()...");
         boolean jailed = plugin.getJailManager().jailPlayer(victim);
-        plugin.getSLF4JLogger().info("JailManager.jailPlayer() returned: {}", jailed);
-
         if (!jailed) {
-            plugin.getSLF4JLogger().error("Failed to jail player - jail location not set!");
+            plugin.getSLF4JLogger().warn("Failed to jail {} - jail location not set!", victim.getName());
         }
 
         // Create punishment record
