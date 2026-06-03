@@ -172,6 +172,14 @@ punishmentTypes:
   # Jail System
   jail:
     enabled: true
+    # Hook into the Essentials jail system when EssentialsX is installed.
+    # true  = jails are created/managed in Essentials (built-in system is not used).
+    # false = always use BanHammer's built-in jail (Essentials is ignored).
+    # Takes effect on plugin (re)start.
+    useEssentials: true
+    # Default Essentials cell used when no cell is given (also used by the hammer).
+    # Command syntax: /jail <player> <duration> [cell] [reason] - the optional [cell] overrides this.
+    essentialsDefaultJail: "1"
     defaultDuration: "30m"
     defaultReason: "Rule violation"
     preventMovement: true

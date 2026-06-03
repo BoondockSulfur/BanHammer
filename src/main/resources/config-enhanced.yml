@@ -109,6 +109,10 @@ punishmentTypes:
   # Enable jail functionality
   jail:
     enabled: false
+    # Hook into Essentials jail when installed (true) or always use built-in jail (false).
+    useEssentials: true
+    # Default Essentials cell when none is given in /jail (also used by the hammer).
+    essentialsDefaultJail: "1"
     location: # Set via command /bh setjail
       world: "world"
       x: 0

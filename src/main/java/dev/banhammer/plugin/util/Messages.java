@@ -390,11 +390,11 @@ public final class Messages {
     }
 
     public Component jailUsage() {
-        return mm.deserialize(raw("jailUsage", "Nutzung: /jail <Spieler> <Dauer> [Grund]"));
+        return mm.deserialize(raw("jailUsage", "Nutzung: /jail <Spieler> <Dauer> [Zelle] [Grund]"));
     }
 
     public Component jailExamples() {
-        return mm.deserialize(raw("jailExamples", "Beispiele: /jail Player 30m, /jail Player permanent Griefing"));
+        return mm.deserialize(raw("jailExamples", "Beispiele: /jail Player 30m, /jail Player 1h 2 Griefing"));
     }
 
     public Component jailedSuccess(String victim, String duration) {

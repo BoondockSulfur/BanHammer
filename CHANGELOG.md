@@ -7,14 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [4.0.1] - 2026-05-21
+## [4.0.1] - 2026-06-03
 
 ### 🐛 Bug Fixes
 
 #### Jail System
-- **Fixed jail escape via relogging** — jailed players are now re-enforced on join (`JailListener#onJoin` → `JailManager#restoreJailOnJoin`). Previously the enforcement cache was cleared on quit and never restored, so a player could leave jail simply by reconnecting.
+- **Fixed jail escape via relogging** — jailed players are now re-enforced on join (`JailListener#onJoin` → `JailManager#restoreJailOnJoin`): the enforcement cache is rebuilt on every join (even within the offline-cleanup window) and restoration also works without a database (the periodic cleanup keeps active jails in memory when no DB is configured). Previously the cache was cleared on quit and never restored, so a player could leave jail simply by reconnecting.
 - **Fixed jails not surviving server restarts** — `loadJailedPlayers()` now runs in `initializeDatabaseDependentComponents()` after the (asynchronous) database is ready, instead of during `onEnable` when it was still `null`.
 - **`/unjail` now works for offline players** — the database record is released even when the target is not online (previously rejected outright).
+- **Fixed jail enforcement being blocked by the plugin's own teleports** — `JailListener#onTeleport` now exempts `PLUGIN`-cause teleports. Previously the plugin's own "teleport back into jail" (and, on Folia, the initial jailing teleport) was cancelled by the very teleport-prevention handler, so a jailed player could leave the jail radius and never be pulled back.
+- **Temporary jails now auto-release without a database** — `JailManager` tracks an in-memory expiry as a fallback when no database is configured. With a database the `UnbanScheduler` remains the sole authority, so there is no duplicate handling or leaked entry.
+- **Fixed return-location being clobbered on re-jail** — the pre-jail location is now saved with `putIfAbsent`, so restoring a jail (relog/restart) no longer overwrites the player's real return location with the jail spot.
+
+#### Essentials Integration
+- **Essentials is now always preferred when hooked** — when Essentials is present, jails are created and managed in Essentials; the built-in jail system is no longer used as a fallback in that case.
+- **Auto-creates an Essentials jail when none exists** — if Essentials is hooked but no jail has been configured, BanHammer registers its configured jail location as an Essentials jail (via `setJail`) instead of falling back to the built-in system. An existing, admin-configured Essentials jail is preferred when present.
+- **Cell selection for `/jail`** — new syntax `/jail <player> <duration> [cell] [reason]`. The optional `cell` targets a specific Essentials jail; when omitted, the configurable default cell is used. Tab-completion suggests existing cells, and a non-existent cell is rejected with the list of available ones. The hammer and reason-only commands use the default cell. Case-insensitive cell matching.
+- **`/jail` no longer requires a built-in jail location when Essentials is hooked** — the location now comes from Essentials.
+
+#### Configuration
+- **New `punishmentTypes.jail.useEssentials` toggle** — enable/disable the Essentials jail hook from the config (default `true`). When `false`, BanHammer always uses its built-in jail even if Essentials is installed. Applies on (re)start.
+- **New `punishmentTypes.jail.essentialsDefaultJail`** (default `"1"`) — the Essentials cell used by the hammer and by `/jail` when no cell is specified.
 
 #### Punishments / IP Bans
 - **Fixed IP-ban removal with anonymization enabled** — `/unban` no longer attempts to pardon an anonymized IP. The real IP is only pardoned when `privacy.ipAnonymization: NONE`; otherwise a hint to use the vanilla `/pardon-ip` is logged. Applied to both manual unban and the auto-unban scheduler.
