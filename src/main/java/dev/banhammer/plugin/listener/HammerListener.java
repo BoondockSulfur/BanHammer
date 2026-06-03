@@ -513,10 +513,17 @@ public final class HammerListener implements Listener {
        ========================= */
 
     private void sendCompat(Player p, Object msg) {
+        if (msg instanceof Component comp) {
+            p.sendMessage(comp);
+            return;
+        }
+        // Render MiniMessage tags (e.g. "<green>...</green>") instead of sending them literally
+        String s = msg == null ? "" : String.valueOf(msg);
         try {
-            if (msg instanceof Component comp) { p.sendMessage(comp); return; }
-        } catch (Throwable ignored) {}
-        p.sendMessage(msg == null ? "" : String.valueOf(msg));
+            p.sendMessage(net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(s));
+        } catch (Throwable e) {
+            p.sendMessage(Component.text(s));
+        }
     }
 
     private void broadcastCompat(Object msg) {

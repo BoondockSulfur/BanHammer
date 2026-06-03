@@ -26,7 +26,7 @@ commands:
     permission: banhammer.mute
   jail:
     description: Jail a player
-    usage: /jail <player> <duration> [reason]
+    usage: /jail <player> <duration> [cell] [reason]
     permission: banhammer.jail
   unjail:
     description: Release a player from jail

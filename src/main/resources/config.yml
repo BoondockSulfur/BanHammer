@@ -49,10 +49,13 @@ effects:
     vertical: 0.35
 
 # ===== RESOURCE PACK =====
+# Disabled by default. The BanHammer texture pack is NOT shipped/sent by the plugin -
+# download it separately and host it yourself, then set 'enabled: true' and your own
+# 'url' + 'hash' below if you want the plugin to send it to players.
 resourcePack:
-  enabled: true
-  url: "https://github.com/ELITEK3V/Ban-Hammer-Pack-/raw/refs/heads/main/an_Hammer1.21.x.zip"
-  hash: "c8aeaa1bb7af7090c068368d7ee8393f82c2a501"
+  enabled: false
+  url: ""
+  hash: ""
   prompt: "This pack provides the BanHammer texture. Accept?"
   force: false
   sendOnJoin: true
@@ -175,6 +178,14 @@ punishmentTypes:
   # Jail System
   jail:
     enabled: true
+    # Hook into the Essentials jail system when EssentialsX is installed.
+    # true  = jails are created/managed in Essentials (built-in system is not used).
+    # false = always use BanHammer's built-in jail (Essentials is ignored).
+    # Takes effect on plugin (re)start.
+    useEssentials: true
+    # Default Essentials cell used when no cell is given (also used by the hammer).
+    # Command syntax: /jail <player> <duration> [cell] [reason] - the optional [cell] overrides this.
+    essentialsDefaultJail: "1"
     defaultDuration: "30m"
     defaultReason: "Rule violation"
     preventMovement: true

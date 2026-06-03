@@ -84,8 +84,9 @@ public class BanHammerPlugin extends JavaPlugin {
         // Initialize Discord webhook
         initializeDiscord();
 
-        // Initialize Essentials jail integration (soft dependency)
-        essentialsJail = new EssentialsJailIntegration(getSLF4JLogger());
+        // Initialize Essentials jail integration (soft dependency, toggleable in config)
+        boolean useEssentials = getConfig().getBoolean("punishmentTypes.jail.useEssentials", true);
+        essentialsJail = new EssentialsJailIntegration(getSLF4JLogger(), useEssentials);
 
         // Initialize jail manager
         jailManager = new JailManager(this, essentialsJail);

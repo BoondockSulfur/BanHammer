@@ -41,8 +41,9 @@ effects:
     vertical: 0.35
 
 # ===== RESOURCE PACK =====
+# Disabled by default - download and self-host the pack, then set your own url + hash.
 resourcePack:
-  enabled: true
+  enabled: false
   url: ""
   hash: ""
   prompt: "Dieses Pack liefert die BanHammer-Textur. Akzeptieren?"
@@ -112,6 +113,10 @@ punishmentTypes:
   # Enable jail functionality
   jail:
     enabled: false
+    # Hook into Essentials jail when installed (true) or always use built-in jail (false).
+    useEssentials: true
+    # Default Essentials cell when none is given in /jail (also used by the hammer).
+    essentialsDefaultJail: "1"
     location: # Set via command /bh setjail
       world: "world"
       x: 0

@@ -73,7 +73,7 @@ public final class Settings {
         knockbackHorizontal = c.getDouble("effects.knockback.horizontal", 0.8);
         knockbackVertical = c.getDouble("effects.knockback.vertical", 0.35);
 
-        rpEnabled = c.getBoolean("resourcePack.enabled", true);
+        rpEnabled = c.getBoolean("resourcePack.enabled", false);
         rpUrl = c.getString("resourcePack.url", "");
         rpHash = c.getString("resourcePack.hash", "");
         rpPrompt = c.getString("resourcePack.prompt", "Dieses Pack liefert die BanHammer-Textur. Akzeptieren?");

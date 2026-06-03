@@ -87,6 +87,14 @@ public class JailListener implements Listener {
             return;
         }
 
+        // Allow the plugin's OWN teleports (jailing a player, pulling an escapee back).
+        // Our jail/enforce teleports fire a PlayerTeleportEvent with cause PLUGIN; without
+        // this exemption this very handler would cancel them, so a jailed player could never
+        // be teleported into jail (Folia) and could simply walk out of the jail radius.
+        if (event.getCause() == PlayerTeleportEvent.TeleportCause.PLUGIN) {
+            return;
+        }
+
         if (!plugin.getConfig().getBoolean("punishmentTypes.jail.preventTeleport", true)) {
             return;
         }

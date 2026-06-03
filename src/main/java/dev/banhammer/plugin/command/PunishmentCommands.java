@@ -174,7 +174,9 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
             return;
         }
 
-        if (plugin.getJailManager().getJailLocation() == null) {
+        // A built-in jail location is only required when Essentials is NOT hooked;
+        // with Essentials the cell location comes from Essentials itself.
+        if (!plugin.getJailManager().isEssentialsAvailable() && plugin.getJailManager().getJailLocation() == null) {
             sender.sendMessage(plugin.messages().prefix()
                     .append(Component.text(" "))
                     .append(plugin.messages().jailNotSet())
@@ -199,7 +201,29 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
         }
 
         String durationStr = args[1];
-        String reason = args.length >= 3 ? String.join(" ", Arrays.copyOfRange(args, 2, args.length))
+
+        // When Essentials is hooked the 3rd argument is the target cell (the configured default
+        // cell is used when omitted), and the reason follows from the 4th argument on. Without
+        // Essentials there is no cell, so the reason starts at the 3rd argument (built-in behaviour).
+        boolean essentials = plugin.getJailManager().isEssentialsAvailable();
+        String cellName = null;
+        int reasonStart = 2;
+        if (essentials && args.length >= 3) {
+            final String requested = args[2];
+            java.util.Collection<String> cells = plugin.getJailManager().getEssentialsJailNames();
+            if (cells.stream().noneMatch(c -> c.equalsIgnoreCase(requested))) {
+                sender.sendMessage(plugin.messages().prefix()
+                        .append(Component.text(" Essentials jail '" + requested + "' does not exist. Available: "
+                                + (cells.isEmpty() ? "(none)" : String.join(", ", cells)))
+                        .color(NamedTextColor.RED)));
+                return;
+            }
+            cellName = requested;
+            reasonStart = 3;
+        }
+
+        String reason = args.length > reasonStart
+                ? String.join(" ", Arrays.copyOfRange(args, reasonStart, args.length))
                 : plugin.getConfig().getString("punishmentTypes.jail.defaultReason", "Kein Grund angegeben");
 
         // Validate reason
@@ -213,7 +237,7 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
 
         Duration duration = parseDuration(durationStr);
 
-        plugin.getPunishmentManager().jailPlayer(staff, victim, reason, duration).thenAccept(id -> {
+        plugin.getPunishmentManager().jailPlayer(staff, victim, reason, duration, cellName).thenAccept(id -> {
             if (id > 0) {
                 String durText = duration == null ? "permanent" : formatDuration(duration);
                 sender.sendMessage(plugin.messages().prefix()
@@ -382,6 +406,10 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
             suggestions.add("30m");
             suggestions.add("1d");
             suggestions.add("7d");
+        } else if (args.length == 3 && command.getName().equalsIgnoreCase("jail")
+                && plugin.getJailManager().isEssentialsAvailable()) {
+            // Suggest Essentials cells for the optional cell argument
+            suggestions.addAll(plugin.getJailManager().getEssentialsJailNames());
         }
 
         return suggestions;

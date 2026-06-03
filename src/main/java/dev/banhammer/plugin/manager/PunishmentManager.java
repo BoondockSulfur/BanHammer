@@ -469,8 +469,22 @@ public class PunishmentManager {
      * @return CompletableFuture with the punishment record ID
      */
     public CompletableFuture<Integer> jailPlayer(Player staff, Player victim, String reason, Duration duration) {
-        plugin.getSLF4JLogger().debug("Jailing {} (staff: {}, reason: {}, duration: {})",
-            victim.getName(), staff.getName(), reason, duration);
+        return jailPlayer(staff, victim, reason, duration, null);
+    }
+
+    /**
+     * Jails a player into a specific Essentials cell.
+     *
+     * @param staff    The staff member issuing the jail
+     * @param victim   The player to jail
+     * @param reason   The jail reason
+     * @param duration The jail duration (null for permanent)
+     * @param cellName The Essentials cell to use, or null for the configured default
+     * @return CompletableFuture with the punishment record ID
+     */
+    public CompletableFuture<Integer> jailPlayer(Player staff, Player victim, String reason, Duration duration, String cellName) {
+        plugin.getSLF4JLogger().debug("Jailing {} (staff: {}, reason: {}, duration: {}, cell: {})",
+            victim.getName(), staff.getName(), reason, duration, cellName);
 
         PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, PunishmentType.JAIL, reason, duration);
         Bukkit.getPluginManager().callEvent(event);
@@ -484,8 +498,9 @@ public class PunishmentManager {
         Duration finalDuration = event.getDuration();
         Instant expiresAt = finalDuration != null ? Instant.now().plus(finalDuration) : null;
 
-        // Actually jail the player
-        boolean jailed = plugin.getJailManager().jailPlayer(victim);
+        // Actually jail the player (pass duration so timed jails auto-release even without a DB,
+        // and the requested Essentials cell)
+        boolean jailed = plugin.getJailManager().jailPlayer(victim, finalDuration, cellName);
         if (!jailed) {
             plugin.getSLF4JLogger().warn("Failed to jail {} - jail location not set!", victim.getName());
         }
