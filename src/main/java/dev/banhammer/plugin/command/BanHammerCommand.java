@@ -4,134 +4,172 @@ import dev.banhammer.plugin.BanHammerPlugin;
 import dev.banhammer.plugin.database.Database;
 import dev.banhammer.plugin.database.model.AppealRecord;
 import dev.banhammer.plugin.database.model.PunishmentRecord;
-import dev.banhammer.plugin.database.model.PunishmentType;
+import dev.banhammer.plugin.database.model.PunishmentStatistics;
+import dev.banhammer.plugin.util.FoliaScheduler;
 import dev.banhammer.plugin.util.ItemFactory;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
-import org.bukkit.OfflinePlayer;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.RemoteConsoleCommandSender;
 import org.bukkit.command.TabExecutor;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
 
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
 
+/**
+ * The {@code /banhammer} command and its subcommands.
+ *
+ * @since 3.0.0
+ */
 public class BanHammerCommand implements TabExecutor {
 
-    private final BanHammerPlugin plugin;
     private static final int ENTRIES_PER_PAGE = 10;
+    private static final int MAX_PENDING_APPEALS = 45;
+
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")
             .withZone(ZoneId.systemDefault());
 
-    public BanHammerCommand(BanHammerPlugin plugin) { this.plugin = plugin; }
+    private final BanHammerPlugin plugin;
+
+    /**
+     * The subcommands, declared once.
+     *
+     * <p>Dispatch, tab completion and the usage line all read this list. Keeping three
+     * hand-written copies is what let them drift apart - the usage text still advertised a
+     * "pack" subcommand that had been removed.
+     */
+    private enum Subcommand {
+        GIVE("give", "banhammer.give", true),
+        RELOAD("reload", "banhammer.reload", false),
+        HISTORY("history", "banhammer.history", true),
+        UNBAN("unban", "banhammer.unban", true),
+        STATS("stats", "banhammer.stats", true),
+        GUI("gui", "banhammer.stats", false),
+        APPEALS("appeals", "banhammer.appeals", false),
+        APPROVE("approve", "banhammer.appeals.review", false),
+        DENY("deny", "banhammer.appeals.review", false);
+
+        private final String label;
+        private final String permission;
+        /** Whether the second argument is a player name, for tab completion. */
+        private final boolean takesPlayerName;
+
+        Subcommand(String label, String permission, boolean takesPlayerName) {
+            this.label = label;
+            this.permission = permission;
+            this.takesPlayerName = takesPlayerName;
+        }
+
+        static Subcommand byLabel(String input) {
+            for (Subcommand sub : values()) {
+                if (sub.label.equalsIgnoreCase(input)) {
+                    return sub;
+                }
+            }
+            return null;
+        }
+    }
+
+    public BanHammerCommand(BanHammerPlugin plugin) {
+        this.plugin = plugin;
+    }
+
+    /**
+     * Builds the usage line from the subcommands the sender may actually use.
+     */
+    private Component usage(CommandSender sender) {
+        String commands = java.util.Arrays.stream(Subcommand.values())
+                .filter(sub -> sender.hasPermission(sub.permission))
+                .map(sub -> sub.label)
+                .collect(java.util.stream.Collectors.joining("|"));
+        return prefixed(plugin.messages().usageBanHammer(commands));
+    }
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage(plugin.messages().prefix()
-                    .append(Component.text(" "))
-                    .append(plugin.messages().bhUsage()));
+            reply(sender, usage(sender));
             return true;
         }
-        switch (args[0].toLowerCase()) {
-            case "reload" -> {
-                if (!sender.hasPermission("banhammer.reload")) {
-                    sender.sendMessage(plugin.messages().noPermission());
-                    return true;
-                }
-                plugin.getSLF4JLogger().info("Reloading BanHammer configuration...");
-                plugin.reloadConfig();
-                plugin.settings().reload();
-                plugin.messages().load();
-                plugin.getPresetManager().reload();
-                plugin.reinitializeDiscord();
-                plugin.reinitializeDatabase();
-                sender.sendMessage(plugin.messages().reloaded());
-                plugin.getSLF4JLogger().info("BanHammer configuration reloaded successfully!");
-            }
-            case "give" -> {
-                if (!sender.hasPermission("banhammer.give")) {
-                    sender.sendMessage(plugin.messages().noPermission());
-                    return true;
-                }
-                if (args.length < 2) {
-                    sender.sendMessage(plugin.messages().prefix()
-                            .append(Component.text(" "))
-                            .append(plugin.messages().giveUsage()));
-                    return true;
-                }
-                Player target = Bukkit.getPlayerExact(args[1]);
-                if (target == null) {
-                    sender.sendMessage(plugin.messages().prefix()
-                            .append(Component.text(" "))
-                            .append(plugin.messages().playerNotFound()));
-                    return true;
-                }
-                target.getInventory().addItem(ItemFactory.createHammer(plugin));
-                sender.sendMessage(plugin.messages().given(target.getName()));
-            }
-            case "history" -> handleHistory(sender, args);
-            case "unban" -> handleUnban(sender, args);
-            case "stats" -> handleStats(sender, args);
-            case "appeals" -> handleAppeals(sender, args);
-            case "approve" -> handleApprove(sender, args);
-            case "deny" -> handleDeny(sender, args);
-            case "gui" -> handleGUI(sender, args);
-            default -> sender.sendMessage(plugin.messages().prefix()
-                    .append(Component.text(" "))
-                    .append(plugin.messages().unknownCommand()));
+
+        Subcommand subcommand = Subcommand.byLabel(args[0]);
+        if (subcommand == null) {
+            reply(sender, prefixed(plugin.messages().unknownCommand()));
+            reply(sender, usage(sender));
+            return true;
+        }
+
+        switch (subcommand) {
+            case RELOAD -> handleReload(sender);
+            case GIVE -> handleGive(sender, args);
+            case HISTORY -> handleHistory(sender, args);
+            case UNBAN -> handleUnban(sender, args);
+            case STATS -> handleStats(sender, args);
+            case APPEALS -> handleAppeals(sender);
+            case APPROVE -> handleReview(sender, args, AppealRecord.AppealStatus.APPROVED);
+            case DENY -> handleReview(sender, args, AppealRecord.AppealStatus.DENIED);
+            case GUI -> handleGUI(sender);
         }
         return true;
     }
 
-    @Override
-    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        List<String> out = new ArrayList<>();
-        if (args.length == 1) {
-            if (sender.hasPermission("banhammer.reload")) out.add("reload");
-            if (sender.hasPermission("banhammer.give")) out.add("give");
-            if (sender.hasPermission("banhammer.history")) out.add("history");
-            if (sender.hasPermission("banhammer.unban")) out.add("unban");
-            if (sender.hasPermission("banhammer.stats")) out.add("stats");
-            if (sender.hasPermission("banhammer.appeals")) out.add("appeals");
-            if (sender.hasPermission("banhammer.appeals.review")) {
-                out.add("approve");
-                out.add("deny");
-            }
-            if (sender.hasPermission("banhammer.stats")) {
-                out.add("gui");
-            }
-        } else if (args.length == 2) {
-            if ("give".equalsIgnoreCase(args[0])) {
-                for (Player p : Bukkit.getOnlinePlayers()) out.add(p.getName());
-            } else if ("history".equalsIgnoreCase(args[0]) || "unban".equalsIgnoreCase(args[0]) || "stats".equalsIgnoreCase(args[0])) {
-                for (Player p : Bukkit.getOnlinePlayers()) out.add(p.getName());
-            }
-        }
-        return out;
-    }
+    // ==================== Subcommands ====================
 
-    // ===== NEW 3.0 COMMAND HANDLERS =====
-
-    private void handleHistory(CommandSender sender, String[] args) {
-        if (!sender.hasPermission("banhammer.history")) {
-            sender.sendMessage(plugin.messages().noPermission());
+    private void handleReload(CommandSender sender) {
+        if (!require(sender, "banhammer.reload")) {
             return;
         }
 
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
-            sender.sendMessage(plugin.messages().databaseDisabled());
+        plugin.getSLF4JLogger().info("Reloading BanHammer configuration...");
+        plugin.reloadAll();
+        reply(sender, plugin.messages().reloaded());
+        plugin.getSLF4JLogger().info("BanHammer configuration reloaded successfully!");
+    }
+
+    private void handleGive(CommandSender sender, String[] args) {
+        if (!require(sender, "banhammer.give")) {
             return;
         }
 
         if (args.length < 2) {
-            sender.sendMessage(plugin.messages().prefix()
-                    .append(Component.text(" "))
-                    .append(plugin.messages().historyUsage()));
+            reply(sender, prefixed(plugin.messages().giveUsage()));
+            return;
+        }
+
+        Player target = Bukkit.getPlayerExact(args[1]);
+        if (target == null) {
+            reply(sender, prefixed(plugin.messages().playerNotFound()));
+            return;
+        }
+
+        // addItem returns whatever did not fit; ignoring it reported success while the hammer
+        // silently never existed.
+        Map<Integer, ItemStack> leftover = target.getInventory().addItem(ItemFactory.createHammer(plugin));
+        if (leftover.isEmpty()) {
+            reply(sender, plugin.messages().given(target.getName()));
+        } else {
+            reply(sender, prefixed(plugin.messages().inventoryFull(target.getName())));
+        }
+    }
+
+    private void handleHistory(CommandSender sender, String[] args) {
+        if (!require(sender, "banhammer.history") || !requireDatabase(sender)) {
+            return;
+        }
+
+        if (args.length < 2) {
+            reply(sender, prefixed(plugin.messages().historyUsage()));
             return;
         }
 
@@ -141,208 +179,195 @@ public class BanHammerCommand implements TabExecutor {
             try {
                 page = Integer.parseInt(args[2]);
             } catch (NumberFormatException e) {
-                sender.sendMessage(plugin.messages().historyInvalidPage());
+                reply(sender, plugin.messages().historyInvalidPage());
                 return;
             }
         }
-
-        // Check permission for viewing other players' history
-        if (sender instanceof Player player) {
-            if (!player.getName().equalsIgnoreCase(targetName) && !sender.hasPermission("banhammer.history.others")) {
-                sender.sendMessage(plugin.messages().noPermission());
-                return;
-            }
-        }
-
-        UUID targetUuid = resolvePlayerUuid(targetName);
-
-        int finalPage = page;
-        plugin.getPunishmentManager().getHistory(targetUuid, 1000).thenAccept(history -> {
-            if (history.isEmpty()) {
-                sender.sendMessage(plugin.messages().historyEmpty());
-                return;
-            }
-
-            int totalPages = (int) Math.ceil(history.size() / (double) ENTRIES_PER_PAGE);
-            if (finalPage < 1 || finalPage > totalPages) {
-                sender.sendMessage(plugin.messages().historyInvalidPage());
-                return;
-            }
-
-            int startIndex = (finalPage - 1) * ENTRIES_PER_PAGE;
-            int endIndex = Math.min(startIndex + ENTRIES_PER_PAGE, history.size());
-
-            sender.sendMessage(plugin.messages().historyHeader(targetName, finalPage, totalPages));
-
-            for (int i = startIndex; i < endIndex; i++) {
-                PunishmentRecord record = history.get(i);
-                sender.sendMessage(plugin.messages().historyEntry(
-                        record.getId(),
-                        record.getType().name(),
-                        record.getReason()
-                ));
-                sender.sendMessage(plugin.messages().historyEntryDate(
-                        DATE_FORMAT.format(record.getIssuedAt())
-                ));
-                sender.sendMessage(plugin.messages().historyEntryStaff(record.getStaffName()));
-
-                if (record.getExpiresAt() != null) {
-                    sender.sendMessage(plugin.messages().historyEntryExpires(
-                            DATE_FORMAT.format(record.getExpiresAt())
-                    ));
-                }
-
-                if (record.isActive()) {
-                    sender.sendMessage(plugin.messages().historyEntryActive());
-                }
-            }
-        }).exceptionally(ex -> {
-            plugin.getSLF4JLogger().error("Failed to retrieve history", ex);
-            sender.sendMessage(plugin.messages().errorOccurred());
-            return null;
-        });
-    }
-
-    private void handleUnban(CommandSender sender, String[] args) {
-        if (!sender.hasPermission("banhammer.unban")) {
-            sender.sendMessage(plugin.messages().noPermission());
+        if (page < 1) {
+            reply(sender, plugin.messages().historyInvalidPage());
             return;
         }
 
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
-            sender.sendMessage(plugin.messages().databaseDisabled());
+        if (sender instanceof Player player
+                && !player.getName().equalsIgnoreCase(targetName)
+                && !sender.hasPermission("banhammer.history.others")) {
+            reply(sender, plugin.messages().noPermission());
+            return;
+        }
+
+        UUID targetUuid = plugin.getPunishmentManager().resolvePlayerUuid(targetName);
+        if (targetUuid == null) {
+            reply(sender, prefixed(plugin.messages().playerNotFound()));
+            return;
+        }
+
+        Database database = plugin.getDatabase();
+        if (database == null) {
+            reply(sender, plugin.messages().databaseDisabled());
+            return;
+        }
+
+        final int finalPage = page;
+        database.countPunishmentsByPlayer(targetUuid)
+                .thenCompose(total -> {
+                    if (total == 0) {
+                        reply(sender, plugin.messages().historyEmpty());
+                        return java.util.concurrent.CompletableFuture.<Void>completedFuture(null);
+                    }
+
+                    int totalPages = (int) Math.ceil(total / (double) ENTRIES_PER_PAGE);
+                    if (finalPage > totalPages) {
+                        reply(sender, plugin.messages().historyInvalidPage());
+                        return java.util.concurrent.CompletableFuture.<Void>completedFuture(null);
+                    }
+
+                    // Fetch only up to the requested page instead of pulling 1000 rows to show ten.
+                    return database.getPunishmentsByPlayer(targetUuid, finalPage * ENTRIES_PER_PAGE)
+                            .thenAccept(history -> printHistoryPage(sender, targetName, history,
+                                    finalPage, totalPages));
+                })
+                .exceptionally(throwable -> fail(sender, "history for " + targetName, throwable));
+    }
+
+    private void printHistoryPage(CommandSender sender, String targetName, List<PunishmentRecord> history,
+                                  int page, int totalPages) {
+        int startIndex = (page - 1) * ENTRIES_PER_PAGE;
+        if (startIndex >= history.size()) {
+            reply(sender, plugin.messages().historyInvalidPage());
+            return;
+        }
+        int endIndex = Math.min(startIndex + ENTRIES_PER_PAGE, history.size());
+
+        reply(sender, plugin.messages().historyHeader(targetName, page, totalPages));
+
+        for (int i = startIndex; i < endIndex; i++) {
+            PunishmentRecord record = history.get(i);
+            reply(sender, plugin.messages().historyEntry(record.getId(), record.getType().name(),
+                    record.getReason() == null ? "-" : record.getReason()));
+            reply(sender, plugin.messages().historyEntryDate(DATE_FORMAT.format(record.getIssuedAt())));
+            reply(sender, plugin.messages().historyEntryStaff(record.getStaffName()));
+
+            if (record.getExpiresAt() != null) {
+                reply(sender, plugin.messages().historyEntryExpires(DATE_FORMAT.format(record.getExpiresAt())));
+            }
+            if (record.isActive()) {
+                reply(sender, plugin.messages().historyEntryActive());
+            }
+        }
+    }
+
+    private void handleUnban(CommandSender sender, String[] args) {
+        if (!require(sender, "banhammer.unban")) {
             return;
         }
 
         if (args.length < 2) {
-            sender.sendMessage(plugin.messages().prefix()
-                    .append(Component.text(" "))
-                    .append(plugin.messages().unbanUsage()));
+            reply(sender, prefixed(plugin.messages().unbanUsage()));
             return;
         }
 
         String targetName = args[1];
-        String reason = args.length >= 3 ? String.join(" ", Arrays.copyOfRange(args, 2, args.length)) : "Entbannt durch Staff";
+        String reason = args.length >= 3
+                ? String.join(" ", Arrays.copyOfRange(args, 2, args.length))
+                : "Unbanned by staff";
 
-        if (!(sender instanceof Player player)) {
-            sender.sendMessage(plugin.messages().notPlayer());
-            return;
-        }
-
-        plugin.getPunishmentManager().unbanPlayer(player, targetName, reason).thenRun(() -> {
-            sender.sendMessage(plugin.messages().unbanned(targetName));
-            if (!reason.isEmpty()) {
-                sender.sendMessage(plugin.messages().unbanReason(reason));
-            }
-        }).exceptionally(ex -> {
-            plugin.getSLF4JLogger().error("Failed to unban player", ex);
-            sender.sendMessage(plugin.messages().errorOccurred());
-            return null;
-        });
+        plugin.getPunishmentManager().unbanPlayer(sender, targetName, reason)
+                .thenAccept(removed -> {
+                    if (removed) {
+                        reply(sender, plugin.messages().unbanned(targetName));
+                        reply(sender, plugin.messages().unbanReason(reason));
+                    } else {
+                        reply(sender, plugin.messages().notBanned(targetName));
+                    }
+                })
+                .exceptionally(throwable -> fail(sender, "unban " + targetName, throwable));
     }
 
     private void handleStats(CommandSender sender, String[] args) {
-        if (!sender.hasPermission("banhammer.stats")) {
-            sender.sendMessage(plugin.messages().noPermission());
-            return;
-        }
-
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
-            sender.sendMessage(plugin.messages().databaseDisabled());
+        if (!require(sender, "banhammer.stats") || !requireDatabase(sender)) {
             return;
         }
 
         String targetName = args.length >= 2 ? args[1] : (sender instanceof Player ? sender.getName() : null);
         if (targetName == null) {
-            sender.sendMessage(plugin.messages().prefix()
-                    .append(Component.text(" "))
-                    .append(plugin.messages().statsUsage()));
+            reply(sender, prefixed(plugin.messages().statsUsage()));
             return;
         }
 
-        UUID targetUuid = resolvePlayerUuid(targetName);
+        // Mirrors the check in /bh history: viewing someone else's record is a separate right.
+        if (sender instanceof Player player
+                && !player.getName().equalsIgnoreCase(targetName)
+                && !sender.hasPermission("banhammer.stats.others")) {
+            reply(sender, plugin.messages().noPermission());
+            return;
+        }
 
-        plugin.getPunishmentManager().getHistory(targetUuid, 1000).thenAccept(history -> {
-            int total = history.size();
-            int bans = (int) history.stream().filter(r -> r.getType() == PunishmentType.BAN || r.getType() == PunishmentType.TEMP_BAN || r.getType() == PunishmentType.IP_BAN).count();
-            int kicks = (int) history.stream().filter(r -> r.getType() == PunishmentType.KICK).count();
-            int mutes = (int) history.stream().filter(r -> r.getType() == PunishmentType.MUTE || r.getType() == PunishmentType.TEMP_MUTE).count();
-            int warnings = (int) history.stream().filter(r -> r.getType() == PunishmentType.WARNING).count();
+        UUID targetUuid = plugin.getPunishmentManager().resolvePlayerUuid(targetName);
+        if (targetUuid == null) {
+            reply(sender, prefixed(plugin.messages().playerNotFound()));
+            return;
+        }
 
-            sender.sendMessage(plugin.messages().statsHeader(targetName));
-            sender.sendMessage(plugin.messages().statsTotal(total));
-            sender.sendMessage(plugin.messages().statsBans(bans));
-            sender.sendMessage(plugin.messages().statsKicks(kicks));
-            sender.sendMessage(plugin.messages().statsMutes(mutes));
-            sender.sendMessage(plugin.messages().statsWarnings(warnings));
-        }).exceptionally(ex -> {
-            plugin.getSLF4JLogger().error("Failed to retrieve stats", ex);
-            sender.sendMessage(plugin.messages().errorOccurred());
-            return null;
-        });
+        Database database = plugin.getDatabase();
+        if (database == null) {
+            reply(sender, plugin.messages().databaseDisabled());
+            return;
+        }
+
+        // Counted in SQL rather than by loading up to 1000 rows and filtering them in Java.
+        database.getStaffStatistics(targetUuid)
+                .thenAccept(stats -> printStats(sender, targetName, stats))
+                .exceptionally(throwable -> fail(sender, "stats for " + targetName, throwable));
     }
 
-    private void handleAppeals(CommandSender sender, String[] args) {
-        if (!sender.hasPermission("banhammer.appeals")) {
-            sender.sendMessage(plugin.messages().noPermission());
-            return;
-        }
-
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
-            sender.sendMessage(plugin.messages().databaseDisabled());
-            return;
-        }
-
-        Database db = plugin.getDatabase();
-        if (db == null) {
-            sender.sendMessage(plugin.messages().databaseDisabled());
-            return;
-        }
-
-        db.getPendingAppeals().thenAccept(appeals -> {
-            if (appeals.isEmpty()) {
-                sender.sendMessage(plugin.messages().appealsEmpty());
-                return;
-            }
-
-            sender.sendMessage(plugin.messages().appealsHeader(appeals.size()));
-
-            for (AppealRecord appeal : appeals) {
-                String shortText = appeal.getAppealText().length() > 50
-                    ? appeal.getAppealText().substring(0, 50) + "..."
-                    : appeal.getAppealText();
-
-                sender.sendMessage(plugin.messages().appealsEntry(
-                    appeal.getId(),
-                    appeal.getPlayerName(),
-                    shortText
-                ));
-                sender.sendMessage(plugin.messages().appealsEntryDate(
-                    DATE_FORMAT.format(appeal.getSubmittedAt())
-                ));
-            }
-        }).exceptionally(ex -> {
-            plugin.getSLF4JLogger().error("Failed to retrieve appeals", ex);
-            sender.sendMessage(plugin.messages().errorOccurred());
-            return null;
-        });
+    private void printStats(CommandSender sender, String targetName, PunishmentStatistics stats) {
+        reply(sender, plugin.messages().statsHeader(targetName));
+        reply(sender, plugin.messages().statsTotal(stats.getTotalPunishments()));
+        reply(sender, plugin.messages().statsBans(stats.getBans()));
+        reply(sender, plugin.messages().statsKicks(stats.getKicks()));
+        reply(sender, plugin.messages().statsMutes(stats.getMutes()));
+        reply(sender, plugin.messages().statsJails(stats.getJails()));
+        reply(sender, plugin.messages().statsWarnings(stats.getWarnings()));
     }
 
-    private void handleApprove(CommandSender sender, String[] args) {
-        if (!sender.hasPermission("banhammer.appeals.review")) {
-            sender.sendMessage(plugin.messages().noPermission());
+    private void handleAppeals(CommandSender sender) {
+        if (!require(sender, "banhammer.appeals") || !requireDatabase(sender)) {
             return;
         }
 
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
-            sender.sendMessage(plugin.messages().databaseDisabled());
+        Database database = plugin.getDatabase();
+        if (database == null) {
+            reply(sender, plugin.messages().databaseDisabled());
             return;
         }
+
+        database.getPendingAppeals(MAX_PENDING_APPEALS)
+                .thenAccept(appeals -> {
+                    if (appeals.isEmpty()) {
+                        reply(sender, plugin.messages().appealsEmpty());
+                        return;
+                    }
+
+                    reply(sender, plugin.messages().appealsHeader(appeals.size()));
+                    for (AppealRecord appeal : appeals) {
+                        String text = appeal.getAppealText();
+                        String shortText = text.length() > 50 ? text.substring(0, 50) + "..." : text;
+                        reply(sender, plugin.messages().appealsEntry(appeal.getId(), appeal.getPlayerName(), shortText));
+                        reply(sender, plugin.messages().appealsEntryDate(DATE_FORMAT.format(appeal.getSubmittedAt())));
+                    }
+                })
+                .exceptionally(throwable -> fail(sender, "pending appeals", throwable));
+    }
+
+    private void handleReview(CommandSender sender, String[] args, AppealRecord.AppealStatus status) {
+        if (!require(sender, "banhammer.appeals.review") || !requireDatabase(sender)) {
+            return;
+        }
+
+        boolean approve = status == AppealRecord.AppealStatus.APPROVED;
 
         if (args.length < 2) {
-            sender.sendMessage(plugin.messages().prefix()
-                    .append(Component.text(" "))
-                    .append(plugin.messages().approveUsage()));
+            reply(sender, prefixed(approve ? plugin.messages().approveUsage() : plugin.messages().denyUsage()));
             return;
         }
 
@@ -350,146 +375,174 @@ public class BanHammerCommand implements TabExecutor {
         try {
             appealId = Integer.parseInt(args[1]);
         } catch (NumberFormatException e) {
-            sender.sendMessage(plugin.messages().appealsInvalidId());
+            reply(sender, plugin.messages().appealsInvalidId());
             return;
         }
 
-        String response = args.length >= 3 ? String.join(" ", Arrays.copyOfRange(args, 2, args.length)) : "Appeal genehmigt";
+        String response = args.length >= 3
+                ? String.join(" ", Arrays.copyOfRange(args, 2, args.length))
+                : (approve ? "Appeal approved" : "Appeal denied");
 
-        if (!(sender instanceof Player player)) {
-            sender.sendMessage(plugin.messages().notPlayer());
-            return;
-        }
-
-        reviewAppeal(player, appealId, AppealRecord.AppealStatus.APPROVED, response);
+        reviewAppeal(sender, appealId, status, response);
     }
 
-    private void handleDeny(CommandSender sender, String[] args) {
-        if (!sender.hasPermission("banhammer.appeals.review")) {
-            sender.sendMessage(plugin.messages().noPermission());
+    private void handleGUI(CommandSender sender) {
+        if (!require(sender, "banhammer.stats")) {
             return;
         }
-
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
-            sender.sendMessage(plugin.messages().databaseDisabled());
-            return;
-        }
-
-        if (args.length < 2) {
-            sender.sendMessage(plugin.messages().prefix()
-                    .append(Component.text(" "))
-                    .append(plugin.messages().denyUsage()));
-            return;
-        }
-
-        int appealId;
-        try {
-            appealId = Integer.parseInt(args[1]);
-        } catch (NumberFormatException e) {
-            sender.sendMessage(plugin.messages().appealsInvalidId());
-            return;
-        }
-
-        String response = args.length >= 3 ? String.join(" ", Arrays.copyOfRange(args, 2, args.length)) : "Appeal abgelehnt";
-
         if (!(sender instanceof Player player)) {
-            sender.sendMessage(plugin.messages().notPlayer());
+            reply(sender, plugin.messages().notPlayer());
             return;
         }
-
-        reviewAppeal(player, appealId, AppealRecord.AppealStatus.DENIED, response);
-    }
-
-    private void handleGUI(CommandSender sender, String[] args) {
-        if (!sender.hasPermission("banhammer.stats")) {
-            sender.sendMessage(plugin.messages().noPermission());
-            return;
-        }
-
-        if (!(sender instanceof Player player)) {
-            sender.sendMessage(plugin.messages().notPlayer());
-            return;
-        }
-
         plugin.getStatisticsGUI().openMainMenu(player);
     }
 
-    private void reviewAppeal(Player staff, int appealId, AppealRecord.AppealStatus status, String response) {
-        Database db = plugin.getDatabase();
-        if (db == null) {
-            staff.sendMessage(plugin.messages().databaseDisabled());
+    private void reviewAppeal(CommandSender staff, int appealId, AppealRecord.AppealStatus status, String response) {
+        Database database = plugin.getDatabase();
+        if (database == null) {
+            reply(staff, plugin.messages().databaseDisabled());
             return;
         }
 
-        db.getAppeal(appealId).thenAccept(appeal -> {
-            if (appeal == null) {
-                staff.sendMessage(plugin.messages().appealsInvalidId());
-                return;
-            }
+        String staffName = staff instanceof Player player
+                ? player.getName()
+                : dev.banhammer.plugin.util.Constants.CONSOLE_NAME;
+        UUID staffUuid = staff instanceof Player player
+                ? player.getUniqueId()
+                : dev.banhammer.plugin.util.Constants.CONSOLE_UUID;
 
+        database.getAppeal(appealId).thenCompose(appeal -> {
+            if (appeal == null) {
+                reply(staff, plugin.messages().appealsInvalidId());
+                return java.util.concurrent.CompletableFuture.completedFuture(null);
+            }
             if (appeal.getStatus() != AppealRecord.AppealStatus.PENDING) {
-                staff.sendMessage(plugin.messages().prefix()
-                        .append(Component.text(" "))
-                        .append(plugin.messages().appealAlreadyProcessed()));
-                return;
+                reply(staff, prefixed(plugin.messages().appealAlreadyProcessed()));
+                return java.util.concurrent.CompletableFuture.completedFuture(null);
             }
 
             appeal.setStatus(status);
-            appeal.setReviewedBy(staff.getUniqueId());
-            appeal.setReviewerName(staff.getName());
+            appeal.setReviewedBy(staffUuid);
+            appeal.setReviewerName(staffName);
             appeal.setReviewResponse(response);
             appeal.setReviewedAt(Instant.now());
 
-            db.updateAppeal(appeal).thenRun(() -> {
-                String statusText = status == AppealRecord.AppealStatus.APPROVED ? "APPROVED" : "DENIED";
-
-                if (status == AppealRecord.AppealStatus.APPROVED) {
-                    staff.sendMessage(plugin.messages().appealApproved(appealId));
-
-                    // Auto-unban if approved
-                    plugin.getPunishmentManager().unbanPlayer(staff, appeal.getPlayerName(), "Appeal genehmigt").thenRun(() -> {
-                        // Notify player if online
-                        Player target = Bukkit.getPlayer(appeal.getPlayerUuid());
-                        if (target != null) {
-                            target.sendMessage(plugin.messages().appealNotification("GENEHMIGT"));
-                            target.sendMessage(plugin.messages().appealResponse(response));
-                        }
-                    });
-                } else {
-                    staff.sendMessage(plugin.messages().appealDenied(appealId));
-
-                    // Notify player if online
-                    Player target = Bukkit.getPlayer(appeal.getPlayerUuid());
-                    if (target != null) {
-                        target.sendMessage(plugin.messages().appealNotification("ABGELEHNT"));
-                        target.sendMessage(plugin.messages().appealResponse(response));
-                    }
+            return database.updateAppeal(appeal).thenAccept(claimed -> {
+                if (!claimed) {
+                    // Another reviewer decided this appeal between the read and the write.
+                    reply(staff, prefixed(plugin.messages().appealAlreadyProcessed()));
+                    return;
                 }
 
-                // Discord notification
-                if (plugin.getDiscord() != null && plugin.getConfig().getBoolean("discord.notifications.appeals", true)) {
-                    plugin.getDiscord().sendAppealReview(appeal.getPlayerName(), appealId, statusText, staff.getName(), response);
+                boolean approved = status == AppealRecord.AppealStatus.APPROVED;
+                reply(staff, approved
+                        ? plugin.messages().appealApproved(appealId)
+                        : plugin.messages().appealDenied(appealId));
+
+                if (approved) {
+                    plugin.getPunishmentManager()
+                            .unbanPlayer(staff, appeal.getPlayerName(), "Appeal approved")
+                            .exceptionally(throwable -> {
+                                fail(staff, "unban after appeal " + appealId, throwable);
+                                return false;
+                            });
                 }
-            }).exceptionally(ex -> {
-                plugin.getSLF4JLogger().error("Failed to update appeal", ex);
-                staff.sendMessage(plugin.messages().errorOccurred());
-                return null;
+
+                notifyAppealAuthor(appeal, approved, response);
+
+                if (plugin.getDiscord() != null) {
+                    plugin.getDiscord().sendAppealReview(appeal.getPlayerName(), appealId,
+                            approved ? "APPROVED" : "DENIED", staffName, response);
+                }
             });
-        }).exceptionally(ex -> {
-            plugin.getSLF4JLogger().error("Failed to retrieve appeal", ex);
-            staff.sendMessage(plugin.messages().errorOccurred());
-            return null;
+        }).exceptionally(throwable -> fail(staff, "appeal review " + appealId, throwable));
+    }
+
+    private void notifyAppealAuthor(AppealRecord appeal, boolean approved, String response) {
+        FoliaScheduler.runGlobal(plugin, () -> {
+            Player target = Bukkit.getPlayer(appeal.getPlayerUuid());
+            if (target != null && target.isOnline()) {
+                target.sendMessage(plugin.messages().appealNotification(approved ? "APPROVED" : "DENIED"));
+                target.sendMessage(plugin.messages().appealResponse(response));
+            }
         });
     }
 
-    @SuppressWarnings("deprecation")
-    private UUID resolvePlayerUuid(String playerName) {
-        Player online = Bukkit.getPlayerExact(playerName);
-        if (online != null) return online.getUniqueId();
+    // ==================== Tab completion ====================
 
-        OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(playerName);
-        if (cached != null) return cached.getUniqueId();
+    @Override
+    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        List<String> out = new ArrayList<>();
 
-        return Bukkit.getOfflinePlayer(playerName).getUniqueId();
+        if (args.length == 1) {
+            for (Subcommand sub : Subcommand.values()) {
+                if (sender.hasPermission(sub.permission)) {
+                    out.add(sub.label);
+                }
+            }
+        } else if (args.length == 2) {
+            // Only offer names for subcommands the sender may actually use, so the completer
+            // does not hand a player list to someone who cannot act on it.
+            Subcommand sub = Subcommand.byLabel(args[0]);
+            if (sub != null && sub.takesPlayerName && sender.hasPermission(sub.permission)) {
+                for (Player player : Bukkit.getOnlinePlayers()) {
+                    out.add(player.getName());
+                }
+            }
+        }
+
+        String prefix = args[args.length - 1].toLowerCase(Locale.ROOT);
+        return out.stream()
+                .filter(s -> s.toLowerCase(Locale.ROOT).startsWith(prefix))
+                .sorted()
+                .toList();
+    }
+
+    // ==================== Helpers ====================
+
+    private boolean require(CommandSender sender, String permission) {
+        if (sender.hasPermission(permission)) {
+            return true;
+        }
+        reply(sender, plugin.messages().noPermission());
+        return false;
+    }
+
+    private boolean requireDatabase(CommandSender sender) {
+        if (plugin.getPunishmentManager().isDatabaseEnabled()) {
+            return true;
+        }
+        reply(sender, plugin.messages().databaseDisabled());
+        return false;
+    }
+
+    private Void fail(CommandSender sender, String what, Throwable throwable) {
+        plugin.getSLF4JLogger().error("Command failed: {}", what, throwable);
+        reply(sender, plugin.messages().errorOccurred());
+        return null;
+    }
+
+    private Component prefixed(Component message) {
+        return plugin.messages().prefix().append(message);
+    }
+
+    private void reply(CommandSender sender, Component message) {
+        // Deliver synchronously when we are already on the main thread. Always deferring to
+        // the next tick loses the reply entirely for RCON: the connection is closed as soon
+        // as the command returns, so a message scheduled for the following tick goes nowhere.
+        if (Bukkit.isPrimaryThread()) {
+            sender.sendMessage(message);
+            return;
+        }
+
+        // An RCON caller is already gone by the time a database query answers, and its
+        // sendMessage() then discards the text silently. Mirror it to the server log so the
+        // result is at least recoverable.
+        if (sender instanceof RemoteConsoleCommandSender) {
+            plugin.getSLF4JLogger().info(PlainTextComponentSerializer.plainText().serialize(message));
+            return;
+        }
+
+        FoliaScheduler.runGlobal(plugin, () -> sender.sendMessage(message));
     }
 }

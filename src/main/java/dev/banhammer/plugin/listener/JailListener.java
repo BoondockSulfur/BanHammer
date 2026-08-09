@@ -24,6 +24,9 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class JailListener implements Listener {
 
+    /** Commands a jailed player may still use. */
+    private static final Set<String> ALLOWED_WHILE_JAILED = Set.of("/appeal", "/help", "/msg", "/r", "/tell");
+
     private final BanHammerPlugin plugin;
 
     // Performance optimization: Local cache for fast jail checks
@@ -65,7 +68,7 @@ public class JailListener implements Listener {
             return;
         }
 
-        if (!plugin.getConfig().getBoolean("punishmentTypes.jail.preventMovement", true)) {
+        if (!plugin.settings().jail().preventMovement()) {
             return;
         }
 
@@ -95,7 +98,7 @@ public class JailListener implements Listener {
             return;
         }
 
-        if (!plugin.getConfig().getBoolean("punishmentTypes.jail.preventTeleport", true)) {
+        if (!plugin.settings().jail().preventTeleport()) {
             return;
         }
 
@@ -115,7 +118,7 @@ public class JailListener implements Listener {
             return;
         }
 
-        if (!plugin.getConfig().getBoolean("punishmentTypes.jail.preventDamage", true)) {
+        if (!plugin.settings().jail().preventDamage()) {
             return;
         }
 
@@ -131,14 +134,18 @@ public class JailListener implements Listener {
             return;
         }
 
-        if (!plugin.getConfig().getBoolean("punishmentTypes.jail.preventCommands", false)) {
+        if (!plugin.settings().jail().preventCommands()) {
             return;
         }
 
-        String command = event.getMessage().split(" ")[0].toLowerCase();
+        String command = event.getMessage().split(" ")[0].toLowerCase(java.util.Locale.ROOT);
+        int colon = command.indexOf(':');
+        if (colon >= 0) {
+            command = "/" + command.substring(colon + 1);
+        }
 
-        // Allow certain commands
-        if (!command.equals("/appeal") && !command.equals("/help")) {
+        // A jailed player must keep the routes that let them contest the punishment.
+        if (!ALLOWED_WHILE_JAILED.contains(command)) {
             event.setCancelled(true);
             player.sendMessage(plugin.messages().jailNoCommands());
         }
@@ -146,6 +153,9 @@ public class JailListener implements Listener {
 
     @EventHandler
     public void onJoin(PlayerJoinEvent event) {
+        if (!plugin.settings().jail().enabled()) {
+            return;
+        }
         // Restore jail enforcement for players who are still jailed.
         // Prevents escaping jail by relogging and restores jails after a restart.
         plugin.getJailManager().restoreJailOnJoin(event.getPlayer());

@@ -1,10 +1,15 @@
 package dev.banhammer.plugin.preset;
 
+import dev.banhammer.plugin.util.DurationParser;
+
 import java.time.Duration;
 
 /**
  * Represents a kick/jail preset.
- * Can be either a kick (no duration) or a jail (with duration).
+ *
+ * <p>The type is stored explicitly rather than being derived from {@code duration == null},
+ * because a {@code null} duration is ambiguous: it means "kick" for a preset without a
+ * {@code duration} key, but "permanent jail" for {@code duration: permanent}.
  *
  * @since 3.0.0
  */
@@ -13,17 +18,34 @@ public class KickJailPreset {
     private final String id;
     private final String displayName;
     private final String reason;
-    private final Duration duration; // null = kick, non-null = jail
+    /** {@code null} means permanent when {@link #type} is {@link PresetType#JAIL}. */
+    private final Duration duration;
     private final String sound;
     private final PresetType type;
 
-    public KickJailPreset(String id, String displayName, String reason, Duration duration, String sound) {
+    public KickJailPreset(String id, String displayName, String reason, PresetType type, Duration duration, String sound) {
         this.id = id;
         this.displayName = displayName;
         this.reason = reason;
-        this.duration = duration;
+        this.type = type;
+        this.duration = (type == PresetType.KICK) ? null : duration;
         this.sound = sound;
-        this.type = (duration == null) ? PresetType.KICK : PresetType.JAIL;
+    }
+
+    /**
+     * Creates a kick preset.
+     */
+    public static KickJailPreset kick(String id, String displayName, String reason, String sound) {
+        return new KickJailPreset(id, displayName, reason, PresetType.KICK, null, sound);
+    }
+
+    /**
+     * Creates a jail preset.
+     *
+     * @param duration the jail duration, or {@code null} for a permanent jail
+     */
+    public static KickJailPreset jail(String id, String displayName, String reason, Duration duration, String sound) {
+        return new KickJailPreset(id, displayName, reason, PresetType.JAIL, duration, sound);
     }
 
     public String getId() {
@@ -38,6 +60,9 @@ public class KickJailPreset {
         return reason;
     }
 
+    /**
+     * @return the jail duration, or {@code null} for a kick or a permanent jail
+     */
     public Duration getDuration() {
         return duration;
     }
@@ -62,23 +87,13 @@ public class KickJailPreset {
      * Returns a formatted display string for the duration.
      */
     public String getDurationDisplay() {
-        if (duration == null) {
+        if (isKick()) {
             return "Kick";
         }
-
-        long totalSeconds = duration.getSeconds();
-        long days = totalSeconds / 86400;
-        long hours = (totalSeconds % 86400) / 3600;
-        long minutes = (totalSeconds % 3600) / 60;
-        long seconds = totalSeconds % 60;
-
-        StringBuilder sb = new StringBuilder();
-        if (days > 0) sb.append(days).append("d");
-        if (hours > 0) sb.append(hours).append("h");
-        if (minutes > 0) sb.append(minutes).append("m");
-        if (seconds > 0) sb.append(seconds).append("s");
-
-        return sb.length() > 0 ? sb.toString() + " Jail" : "Jail";
+        if (duration == null) {
+            return "Permanent Jail";
+        }
+        return DurationParser.formatHuman(duration) + " Jail";
     }
 
     public enum PresetType {

@@ -1,14 +1,22 @@
 package dev.banhammer.plugin.util;
 
 import java.time.Duration;
-import java.util.Optional;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Utility class for parsing duration strings.
  * Supports multiple formats:
- * - Custom format: "7d", "1h30m", "2d12h", etc.
- * - ISO-8601 format: "PT24H", "P7D", etc.
- * - Keywords: "permanent", "perm"
+ * <ul>
+ *   <li>Custom format: {@code "7d"}, {@code "1h30m"}, {@code "2d12h"}, {@code "1w"}, {@code "3mo"}</li>
+ *   <li>ISO-8601 format: {@code "PT24H"}, {@code "P7D"}</li>
+ *   <li>Keywords: {@code "permanent"}, {@code "perm"}, {@code "forever"}</li>
+ * </ul>
+ *
+ * <p><b>Important:</b> parsing distinguishes between "explicitly permanent" and
+ * "could not be understood". A typo such as {@code "1woche"} yields
+ * {@link Result#isInvalid()} rather than silently becoming a permanent punishment.
  *
  * @since 3.0.0
  */
@@ -18,159 +26,233 @@ public final class DurationParser {
         // Utility class - prevent instantiation
     }
 
+    /** Upper bound for a temporary punishment; anything longer should be permanent. */
+    public static final Duration MAX_DURATION = Duration.ofDays(365L * 100L);
+
+    private static final long SECONDS_PER_MINUTE = 60L;
+    private static final long SECONDS_PER_HOUR = 3600L;
+    private static final long SECONDS_PER_DAY = 86400L;
+    private static final long SECONDS_PER_WEEK = 7L * SECONDS_PER_DAY;
+    private static final long SECONDS_PER_MONTH = 30L * SECONDS_PER_DAY;
+    private static final long SECONDS_PER_YEAR = 365L * SECONDS_PER_DAY;
+
     /**
-     * Parses a duration string.
-     *
-     * @param durationStr The duration string to parse
-     * @return The parsed Duration, or null if permanent/invalid
+     * A single {@code <number><unit>} pair. {@code mo} must be listed before {@code m}
+     * so that "3mo" is read as months rather than "3m" followed by a stray "o".
      */
-    public static Duration parse(String durationStr) {
-        if (durationStr == null || durationStr.trim().isEmpty()) {
-            return null;
-        }
+    private static final Pattern TOKEN = Pattern.compile("(\\d{1,18})\\s*(mo|[ywdhms])");
 
-        String s = durationStr.trim();
+    /** The whole string must consist of nothing but such pairs. */
+    private static final Pattern FULL = Pattern.compile("(?:\\d{1,18}\\s*(?:mo|[ywdhms])\\s*)+");
 
-        // Explicit handling for "permanent" keyword
-        if (s.equalsIgnoreCase("permanent") || s.equalsIgnoreCase("perm")) {
-            return null; // null = permanent
-        }
-
-        // Try ISO-8601 format (case-insensitive)
-        if (s.toUpperCase().startsWith("P")) {
-            try {
-                return Duration.parse(s.toUpperCase());
-            } catch (Exception e) {
-                // Fall through to custom parsing
-            }
-        }
-
-        // Custom format: "7d", "1h30m", "2d12h", etc.
-        String tmp = s.toLowerCase();
-        long days = extractTime(tmp, "d");
-        long hours = extractTime(tmp, "h");
-        long minutes = extractTime(tmp, "m");
-        long seconds = extractTime(tmp, "s");
-
-        // Check if any time unit was found
-        if (days == 0 && hours == 0 && minutes == 0 && seconds == 0) {
-            return null; // Invalid format, default to permanent
-        }
-
-        Duration duration = Duration.ZERO;
-        if (days > 0) duration = duration.plusDays(days);
-        if (hours > 0) duration = duration.plusHours(hours);
-        if (minutes > 0) duration = duration.plusMinutes(minutes);
-        if (seconds > 0) duration = duration.plusSeconds(seconds);
-
-        return duration;
+    /**
+     * Outcome of a parse attempt.
+     */
+    public enum Status {
+        /** A concrete, positive duration was parsed. */
+        DURATION,
+        /** The input explicitly asked for a permanent punishment. */
+        PERMANENT,
+        /** The input could not be understood. */
+        INVALID
     }
 
     /**
-     * Parses a duration string with validation.
+     * Result of {@link DurationParser#parse(String)}.
      *
-     * @param durationStr The duration string to parse
-     * @return Optional containing the parsed Duration, or empty if invalid
+     * @param status   what kind of result this is
+     * @param duration the parsed duration, or {@code null} for permanent/invalid
      */
-    public static Optional<Duration> parseValidated(String durationStr) {
-        try {
-            Duration duration = parse(durationStr);
-            // null is valid (permanent), but negative durations are not
-            if (duration != null && duration.isNegative()) {
-                return Optional.empty();
-            }
-            return Optional.ofNullable(duration);
-        } catch (Exception e) {
-            return Optional.empty();
+    public record Result(Status status, Duration duration) {
+
+        private static final Result PERMANENT = new Result(Status.PERMANENT, null);
+        private static final Result INVALID = new Result(Status.INVALID, null);
+
+        static Result permanent() {
+            return PERMANENT;
         }
+
+        static Result invalid() {
+            return INVALID;
+        }
+
+        static Result of(Duration duration) {
+            return new Result(Status.DURATION, duration);
+        }
+
+        /** @return true if the input was understood (either a duration or "permanent") */
+        public boolean isValid() {
+            return status != Status.INVALID;
+        }
+
+        /** @return true if the input could not be understood */
+        public boolean isInvalid() {
+            return status == Status.INVALID;
+        }
+
+        /** @return true if the input explicitly requested a permanent punishment */
+        public boolean isPermanent() {
+            return status == Status.PERMANENT;
+        }
+
+        /**
+         * Returns the duration to hand to the punishment API, where {@code null} means permanent.
+         *
+         * @return the duration, or {@code null} if permanent
+         * @throws IllegalStateException if this result is {@link Status#INVALID}
+         */
+        public Duration orNullForPermanent() {
+            if (status == Status.INVALID) {
+                throw new IllegalStateException("Cannot use an invalid duration result");
+            }
+            return duration;
+        }
+    }
+
+    /**
+     * Parses a duration string.
+     *
+     * @param durationStr the duration string to parse
+     * @return the parse result; never {@code null}
+     */
+    public static Result parse(String durationStr) {
+        if (durationStr == null) {
+            return Result.invalid();
+        }
+
+        String s = durationStr.trim();
+        if (s.isEmpty()) {
+            return Result.invalid();
+        }
+
+        String lower = s.toLowerCase(Locale.ROOT);
+
+        if (lower.equals("permanent") || lower.equals("perm") || lower.equals("forever") || lower.equals("never")) {
+            return Result.permanent();
+        }
+
+        // ISO-8601 ("PT24H", "P7D"); Duration.parse itself rejects malformed input.
+        if (lower.startsWith("p")) {
+            try {
+                Duration parsed = Duration.parse(s.toUpperCase(Locale.ROOT));
+                return clamp(parsed);
+            } catch (Exception e) {
+                return Result.invalid();
+            }
+        }
+
+        // The entire string must be made up of <number><unit> pairs - no leftovers,
+        // so "1woche", "abc" and "-5m" are rejected instead of being misread.
+        String compact = lower.replace(" ", "");
+        if (!FULL.matcher(compact).matches()) {
+            return Result.invalid();
+        }
+
+        long totalSeconds = 0L;
+        Matcher matcher = TOKEN.matcher(compact);
+        while (matcher.find()) {
+            long value;
+            try {
+                value = Long.parseLong(matcher.group(1));
+            } catch (NumberFormatException e) {
+                return Result.invalid();
+            }
+
+            long unitSeconds = switch (matcher.group(2)) {
+                case "y" -> SECONDS_PER_YEAR;
+                case "mo" -> SECONDS_PER_MONTH;
+                case "w" -> SECONDS_PER_WEEK;
+                case "d" -> SECONDS_PER_DAY;
+                case "h" -> SECONDS_PER_HOUR;
+                case "m" -> SECONDS_PER_MINUTE;
+                case "s" -> 1L;
+                default -> 0L;
+            };
+
+            try {
+                totalSeconds = Math.addExact(totalSeconds, Math.multiplyExact(value, unitSeconds));
+            } catch (ArithmeticException e) {
+                // Overflow - far beyond MAX_DURATION anyway.
+                return Result.invalid();
+            }
+
+            if (totalSeconds > MAX_DURATION.getSeconds()) {
+                return Result.invalid();
+            }
+        }
+
+        if (totalSeconds <= 0L) {
+            // "0m" is not a meaningful punishment length.
+            return Result.invalid();
+        }
+
+        return Result.of(Duration.ofSeconds(totalSeconds));
+    }
+
+    private static Result clamp(Duration duration) {
+        if (duration.isZero() || duration.isNegative()) {
+            return Result.invalid();
+        }
+        if (duration.compareTo(MAX_DURATION) > 0) {
+            return Result.invalid();
+        }
+        return Result.of(duration);
+    }
+
+    /**
+     * Convenience check used by configuration validation.
+     *
+     * @param durationStr the duration string to validate
+     * @return true if the string is either a valid duration or an explicit "permanent"
+     */
+    public static boolean isValid(String durationStr) {
+        return parse(durationStr).isValid();
     }
 
     /**
      * Formats a duration into a human-readable string.
      *
-     * @param duration The duration to format
-     * @return Human-readable string (e.g., "7d 12h 30m")
+     * @param duration the duration to format, or {@code null} for permanent
+     * @return human-readable string (e.g. {@code "7d 12h 30m"})
      */
     public static String formatHuman(Duration duration) {
         if (duration == null) {
             return "permanent";
         }
 
-        long totalSeconds = duration.getSeconds();
-        long days = totalSeconds / 86400;
-        long hours = (totalSeconds % 86400) / 3600;
-        long minutes = (totalSeconds % 3600) / 60;
-        long seconds = totalSeconds % 60;
+        long totalSeconds = Math.max(0L, duration.getSeconds());
+        long days = totalSeconds / SECONDS_PER_DAY;
+        long hours = (totalSeconds % SECONDS_PER_DAY) / SECONDS_PER_HOUR;
+        long minutes = (totalSeconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE;
+        long seconds = totalSeconds % SECONDS_PER_MINUTE;
 
         StringBuilder sb = new StringBuilder();
         if (days > 0) sb.append(days).append("d");
         if (hours > 0) {
-            if (sb.length() > 0) sb.append(" ");
+            if (!sb.isEmpty()) sb.append(" ");
             sb.append(hours).append("h");
         }
         if (minutes > 0) {
-            if (sb.length() > 0) sb.append(" ");
+            if (!sb.isEmpty()) sb.append(" ");
             sb.append(minutes).append("m");
         }
-        if (seconds > 0 && sb.length() == 0) {
+        if (seconds > 0 && sb.isEmpty()) {
             sb.append(seconds).append("s");
         }
 
-        return sb.length() == 0 ? "0s" : sb.toString();
+        return sb.isEmpty() ? "0s" : sb.toString();
     }
 
     /**
      * Formats a duration with parentheses for display.
      *
-     * @param duration The duration to format
-     * @return Formatted string like " (7d 12h)" or "" if permanent
+     * @param duration the duration to format
+     * @return formatted string like {@code " (7d 12h)"}, or an empty string if permanent
      */
     public static String formatDisplay(Duration duration) {
         if (duration == null || duration.isZero()) {
             return "";
         }
         return " (" + formatHuman(duration) + ")";
-    }
-
-    /**
-     * Extracts a time value for a specific unit from a duration string.
-     *
-     * @param str The duration string
-     * @param unit The unit to extract ("d", "h", "m", "s")
-     * @return The extracted value, or 0 if not found
-     */
-    private static long extractTime(String str, String unit) {
-        int index = str.toLowerCase().indexOf(unit);
-        if (index < 1) return 0;
-
-        int start = index - 1;
-        while (start >= 0 && Character.isDigit(str.charAt(start))) {
-            start--;
-        }
-
-        try {
-            return Long.parseLong(str.substring(start + 1, index));
-        } catch (NumberFormatException e) {
-            return 0;
-        }
-    }
-
-    /**
-     * Validates if a duration string is valid.
-     *
-     * @param durationStr The duration string to validate
-     * @return true if valid, false otherwise
-     */
-    public static boolean isValid(String durationStr) {
-        if (durationStr == null || durationStr.trim().isEmpty()) {
-            return true; // null/empty is valid (permanent)
-        }
-
-        try {
-            Duration duration = parse(durationStr);
-            return duration == null || !duration.isNegative();
-        } catch (Exception e) {
-            return false;
-        }
     }
 }

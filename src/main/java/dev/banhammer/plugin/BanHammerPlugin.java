@@ -1,178 +1,128 @@
 package dev.banhammer.plugin;
 
+import dev.banhammer.plugin.command.AppealCommand;
 import dev.banhammer.plugin.command.BanHammerCommand;
+import dev.banhammer.plugin.command.PunishmentCommands;
 import dev.banhammer.plugin.database.Database;
 import dev.banhammer.plugin.database.MySQLDatabase;
 import dev.banhammer.plugin.database.SQLiteDatabase;
+import dev.banhammer.plugin.gui.StatisticsGUI;
 import dev.banhammer.plugin.integration.DiscordWebhook;
 import dev.banhammer.plugin.integration.EssentialsJailIntegration;
+import dev.banhammer.plugin.listener.GUIListener;
 import dev.banhammer.plugin.listener.HammerListener;
+import dev.banhammer.plugin.listener.JailListener;
+import dev.banhammer.plugin.listener.JoinNotificationListener;
+import dev.banhammer.plugin.listener.MuteListener;
 import dev.banhammer.plugin.manager.JailManager;
 import dev.banhammer.plugin.manager.PunishmentManager;
+import dev.banhammer.plugin.preset.PresetManager;
 import dev.banhammer.plugin.scheduler.UnbanScheduler;
+import dev.banhammer.plugin.update.ModrinthUpdateChecker;
+import dev.banhammer.plugin.util.ConfigValidator;
+import dev.banhammer.plugin.util.FoliaScheduler;
 import dev.banhammer.plugin.util.Messages;
 import dev.banhammer.plugin.util.Settings;
 import org.bukkit.NamespacedKey;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.io.File;
+import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Main plugin class for BanHammer.
- * Handles initialization and shutdown of all components.
  *
  * @since 3.0.0
  */
 public class BanHammerPlugin extends JavaPlugin {
 
     private static BanHammerPlugin instance;
+
     private Settings settings;
     private Messages messages;
     private NamespacedKey pdcKey;
 
-    // New 3.0 components
-    private Database database;
-    private DiscordWebhook discord;
+    private volatile Database database;
+    private volatile DiscordWebhook discord;
     private EssentialsJailIntegration essentialsJail;
     private PunishmentManager punishmentManager;
-    private UnbanScheduler unbanScheduler;
+    private volatile UnbanScheduler unbanScheduler;
     private JailManager jailManager;
-    private dev.banhammer.plugin.gui.StatisticsGUI statisticsGUI;
-    private dev.banhammer.plugin.preset.PresetManager presetManager;
-    private dev.banhammer.plugin.update.ModrinthUpdateChecker updateChecker;
+    private StatisticsGUI statisticsGUI;
+    private PresetManager presetManager;
+    private ModrinthUpdateChecker updateChecker;
+
+    /** Guards against two overlapping database initializations (e.g. a rapid double reload). */
+    private final AtomicBoolean databaseInitializing = new AtomicBoolean(false);
 
     @Override
     public void onEnable() {
         instance = this;
 
-        // bStats Metrics
         new org.bstats.bukkit.Metrics(this, 31076);
 
-        // Detect Folia vs Paper
-        dev.banhammer.plugin.util.FoliaScheduler.init();
-        if (dev.banhammer.plugin.util.FoliaScheduler.isFolia()) {
+        FoliaScheduler.init();
+        if (FoliaScheduler.isFolia()) {
             getSLF4JLogger().info("Folia detected - using region-based schedulers");
         }
 
-        // Save and load config
         saveDefaultConfig();
 
-        // Validate configuration
-        if (!dev.banhammer.plugin.util.ConfigValidator.validate(getConfig(), getSLF4JLogger())) {
-            getSLF4JLogger().error("Configuration validation failed! Plugin may not work correctly.");
-            getSLF4JLogger().error("Please fix the errors in config.yml and reload the plugin.");
-            // Don't disable plugin - let it run with warnings
+        if (!ConfigValidator.validate(getConfig(), getSLF4JLogger())) {
+            getSLF4JLogger().error("Configuration validation failed - please fix the errors listed above.");
+            getSLF4JLogger().error("BanHammer will run with defaults for the invalid values.");
         }
 
-        // Generate hash salt if needed
         generateHashSaltIfNeeded();
 
         settings = new Settings(this);
         messages = new Messages(this);
-pdcKey = new NamespacedKey(this, "ban_hammer");
+        pdcKey = new NamespacedKey(this, "ban_hammer");
 
-        // Initialize database if enabled (async to prevent blocking main thread)
+        initializeDiscord();
+
+        essentialsJail = new EssentialsJailIntegration(this, getSLF4JLogger(), settings.jail().useEssentials());
+        jailManager = new JailManager(this, essentialsJail);
+        jailManager.start();
+        punishmentManager = new PunishmentManager(this, null, discord);
+        presetManager = new PresetManager(this);
+
+        updateChecker = new ModrinthUpdateChecker(this);
+        updateChecker.start();
+
+        registerListeners();
+        registerCommands();
+
         if (getConfig().getBoolean("database.enabled", false)) {
             initializeDatabaseAsync();
         } else {
-            getSLF4JLogger().debug("Database is disabled. Using vanilla ban system only.");
+            getSLF4JLogger().info("Database is disabled - using the vanilla ban system only.");
         }
 
-        // Initialize Discord webhook
-        initializeDiscord();
-
-        // Initialize Essentials jail integration (soft dependency, toggleable in config)
-        boolean useEssentials = getConfig().getBoolean("punishmentTypes.jail.useEssentials", true);
-        essentialsJail = new EssentialsJailIntegration(getSLF4JLogger(), useEssentials);
-
-        // Initialize jail manager
-        jailManager = new JailManager(this, essentialsJail);
-
-        // Initialize punishment manager (database might be null initially if async init is still running)
-        punishmentManager = new PunishmentManager(this, database, discord);
-
-        // Initialize preset manager
-        presetManager = new dev.banhammer.plugin.preset.PresetManager(this);
-
-        // Initialize update checker
-        updateChecker = new dev.banhammer.plugin.update.ModrinthUpdateChecker(this);
-        updateChecker.start();
-
-        // Note: UnbanScheduler and loadActiveMutes() will be initialized
-        // in initializeDatabaseDependentComponents() after database is ready
-
-        // Register events
-        getServer().getPluginManager().registerEvents(new HammerListener(this), this);
-        getServer().getPluginManager().registerEvents(new dev.banhammer.plugin.listener.JoinNotificationListener(this), this);
-
-        // Register mute listener if mute system is enabled
-        if (getConfig().getBoolean("punishmentTypes.mute.enabled", true)) {
-            getServer().getPluginManager().registerEvents(new dev.banhammer.plugin.listener.MuteListener(this), this);
-        }
-
-        // Register jail listener if jail system is enabled
-        if (getConfig().getBoolean("punishmentTypes.jail.enabled", true)) {
-            getServer().getPluginManager().registerEvents(new dev.banhammer.plugin.listener.JailListener(this), this);
-            // Note: already-online jailed players are restored in
-            // initializeDatabaseDependentComponents() once the database is ready;
-            // (re)joining players are restored per-player via JailListener#onJoin.
-        }
-
-        // Initialize statistics GUI
-        statisticsGUI = new dev.banhammer.plugin.gui.StatisticsGUI(this);
-        getServer().getPluginManager().registerEvents(new dev.banhammer.plugin.listener.GUIListener(this, statisticsGUI), this);
-
-        // Register commands
-        var cmd = new BanHammerCommand(this);
-        var handle = Objects.requireNonNull(getCommand("banhammer"),
-                "Command 'banhammer' nicht in plugin.yml registriert");
-        handle.setExecutor(cmd);
-        handle.setTabCompleter(cmd);
-
-        // Register appeal command
-        var appealCmd = new dev.banhammer.plugin.command.AppealCommand(this);
-        var appealHandle = Objects.requireNonNull(getCommand("appeal"),
-                "Command 'appeal' nicht in plugin.yml registriert");
-        appealHandle.setExecutor(appealCmd);
-
-        // Register punishment commands
-        var punishCmd = new dev.banhammer.plugin.command.PunishmentCommands(this);
-        Objects.requireNonNull(getCommand("mute")).setExecutor(punishCmd);
-        Objects.requireNonNull(getCommand("unmute")).setExecutor(punishCmd);
-        Objects.requireNonNull(getCommand("jail")).setExecutor(punishCmd);
-        Objects.requireNonNull(getCommand("unjail")).setExecutor(punishCmd);
-        Objects.requireNonNull(getCommand("warn")).setExecutor(punishCmd);
-        Objects.requireNonNull(getCommand("setjail")).setExecutor(punishCmd);
-        Objects.requireNonNull(getCommand("mute")).setTabCompleter(punishCmd);
-        Objects.requireNonNull(getCommand("jail")).setTabCompleter(punishCmd);
-
-        getSLF4JLogger().info("BanHammer v4.0.1 enabled successfully!");
+        getSLF4JLogger().info("BanHammer v{} enabled successfully!", getPluginMeta().getVersion());
     }
 
     @Override
     public void onDisable() {
-        // Stop update checker
         if (updateChecker != null) {
             updateChecker.stop();
         }
-
-        // Stop scheduler
         if (unbanScheduler != null) {
             unbanScheduler.stop();
         }
-
-        // Stop jail manager cleanup task
         if (jailManager != null) {
             jailManager.shutdown();
         }
 
-        // Close database
         if (database != null) {
-            database.shutdown().join();
+            // Bounded: a hung database must not stop the server from shutting down.
+            awaitShutdown(database, 15);
+            database = null;
         }
 
-        // Close Discord webhook
         if (discord != null) {
             discord.shutdown();
         }
@@ -180,265 +130,283 @@ pdcKey = new NamespacedKey(this, "ban_hammer");
         getSLF4JLogger().info("BanHammer disabled.");
     }
 
+    private void awaitShutdown(Database target, int timeoutSeconds) {
+        try {
+            target.shutdown().get(timeoutSeconds, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            getSLF4JLogger().warn("Database did not shut down within {}s: {}", timeoutSeconds, e.toString());
+        }
+    }
+
+    // ==================== Registration ====================
+
     /**
-     * Initializes the database based on config settings asynchronously.
+     * Registers all listeners unconditionally.
+     *
+     * <p>The mute and jail listeners used to be registered only when their feature was
+     * enabled at startup, so enabling the feature and running {@code /bh reload} produced a
+     * half-working state: {@code /mute} wrote a record but the player could still talk.
+     * Each listener now checks its own toggle when an event arrives.
+     */
+    private void registerListeners() {
+        var pluginManager = getServer().getPluginManager();
+
+        pluginManager.registerEvents(new HammerListener(this), this);
+        pluginManager.registerEvents(new JoinNotificationListener(this), this);
+        pluginManager.registerEvents(new MuteListener(this), this);
+
+        JailListener jailListener = new JailListener(this);
+        pluginManager.registerEvents(jailListener, this);
+        jailManager.setJailListener(jailListener);
+
+        statisticsGUI = new StatisticsGUI(this);
+        pluginManager.registerEvents(new GUIListener(this, statisticsGUI), this);
+    }
+
+    private void registerCommands() {
+        var cmd = new BanHammerCommand(this);
+        var handle = Objects.requireNonNull(getCommand("banhammer"),
+                "Command 'banhammer' is not declared in plugin.yml");
+        handle.setExecutor(cmd);
+        handle.setTabCompleter(cmd);
+
+        var appealCmd = new AppealCommand(this);
+        Objects.requireNonNull(getCommand("appeal"),
+                "Command 'appeal' is not declared in plugin.yml").setExecutor(appealCmd);
+
+        var punishCmd = new PunishmentCommands(this);
+        for (String name : new String[]{"mute", "unmute", "jail", "unjail", "warn", "setjail"}) {
+            var command = Objects.requireNonNull(getCommand(name),
+                    "Command '" + name + "' is not declared in plugin.yml");
+            command.setExecutor(punishCmd);
+            command.setTabCompleter(punishCmd);
+        }
+    }
+
+    // ==================== Database ====================
+
+    /**
+     * Creates and initializes the configured database off the main thread.
      */
     private void initializeDatabaseAsync() {
-        String type = getConfig().getString("database.type", "SQLITE").toUpperCase();
+        if (!databaseInitializing.compareAndSet(false, true)) {
+            getSLF4JLogger().warn("Database initialization is already in progress - ignoring this request.");
+            return;
+        }
 
-        Database tempDatabase = switch (type) {
-            case "SQLITE" -> new SQLiteDatabase(getSLF4JLogger(), getDataFolder());
-            case "MYSQL" -> {
-                String host = getConfig().getString("database.mysql.host", "localhost");
-                int port = getConfig().getInt("database.mysql.port", 3306);
-                String db = getConfig().getString("database.mysql.database", "banhammer");
-                String user = getConfig().getString("database.mysql.username", "root");
-                String pass = getConfig().getString("database.mysql.password", "password");
-                yield new MySQLDatabase(getSLF4JLogger(), host, port, db, user, pass);
-            }
+        Database tempDatabase = createDatabase();
+        if (tempDatabase == null) {
+            databaseInitializing.set(false);
+            return;
+        }
+
+        long timeoutSeconds = getConfig().getLong("database.initializationTimeoutSeconds", 60);
+
+        CompletableFuture<Void> init = tempDatabase.initialize();
+        init.orTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .whenComplete((result, throwable) -> {
+                    if (throwable != null) {
+                        if (throwable instanceof java.util.concurrent.TimeoutException) {
+                            getSLF4JLogger().error("Database initialization timed out after {} seconds. "
+                                    + "Increase 'database.initializationTimeoutSeconds' in config.yml.", timeoutSeconds);
+                        } else {
+                            getSLF4JLogger().error("Failed to initialize database", throwable);
+                        }
+
+                        // orTimeout only completes the *derived* future; the initialization
+                        // itself keeps running and may still open a pool. Shut it down once it
+                        // settles, otherwise every timeout leaks a HikariCP pool and its threads.
+                        init.whenComplete((ignored, ignoredError) -> tempDatabase.shutdown());
+
+                        database = null;
+                        databaseInitializing.set(false);
+                        return;
+                    }
+
+                    database = tempDatabase;
+                    databaseInitializing.set(false);
+                    getSLF4JLogger().info("Database initialized successfully");
+
+                    FoliaScheduler.runGlobal(this, this::initializeDatabaseDependentComponents);
+                });
+    }
+
+    private Database createDatabase() {
+        String type = getConfig().getString("database.type", "SQLITE");
+        type = type == null ? "SQLITE" : type.trim().toUpperCase(Locale.ROOT);
+
+        return switch (type) {
+            case "SQLITE" -> new SQLiteDatabase(getSLF4JLogger(), getDataFolder(),
+                    getConfig().getString("database.sqlite.file", "banhammer.db"));
+            case "MYSQL", "MARIADB" -> new MySQLDatabase(getSLF4JLogger(),
+                    getConfig().getString("database.mysql.host", "localhost"),
+                    getConfig().getInt("database.mysql.port", 3306),
+                    getConfig().getString("database.mysql.database", "banhammer"),
+                    getConfig().getString("database.mysql.username", "root"),
+                    getConfig().getString("database.mysql.password", ""),
+                    getConfig().getBoolean("database.mysql.useSsl", false));
             default -> {
-                getSLF4JLogger().error("Invalid database type: {}. Using vanilla ban system.", type);
+                getSLF4JLogger().error("Invalid database type '{}' - using the vanilla ban system.", type);
                 yield null;
             }
         };
-
-        if (tempDatabase == null) {
-            return;
-        }
-
-        // Initialize database asynchronously with configurable timeout
-        long timeoutSeconds = getConfig().getLong("database.initializationTimeoutSeconds", 60);
-        tempDatabase.initialize()
-            .orTimeout(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)
-            .whenComplete((result, throwable) -> {
-                if (throwable != null) {
-                    if (throwable instanceof java.util.concurrent.TimeoutException) {
-                        getSLF4JLogger().error("Database initialization timed out after {} seconds. " +
-                                "Try increasing 'database.initializationTimeoutSeconds' in config.", timeoutSeconds);
-                    } else {
-                        getSLF4JLogger().error("Failed to initialize database", throwable);
-                    }
-                    database = null;
-                } else {
-                    database = tempDatabase;
-                    getSLF4JLogger().info("Database initialized successfully");
-
-                    // Initialize database-dependent components on main/global thread
-                    dev.banhammer.plugin.util.FoliaScheduler.runGlobal(this, this::initializeDatabaseDependentComponents);
-                }
-            });
     }
 
     /**
-     * Initializes components that depend on the database being ready.
-     * Must be called on main thread.
+     * Wires up everything that needs a ready database. Runs on the main/global thread.
      */
     private void initializeDatabaseDependentComponents() {
-        if (database == null) {
+        Database current = database;
+        if (current == null) {
             return;
         }
 
-        // Update punishment manager with database reference (instead of creating new instance)
-        punishmentManager.updateDatabase(database);
-
-        // Load active mutes into cache
+        punishmentManager.updateDatabase(current);
         punishmentManager.loadActiveMutes();
 
-        // Restore jailed players that are already online (e.g. after a /reload).
-        // The database was not ready when onEnable ran, so this must happen here.
-        if (getConfig().getBoolean("punishmentTypes.jail.enabled", true)) {
+        if (settings.jail().enabled()) {
             jailManager.loadJailedPlayers();
         }
 
-        // Initialize auto-unban scheduler if enabled
-        if (getConfig().getBoolean("tempBans.enabled", true)) {
-            unbanScheduler = new UnbanScheduler(this, database, discord);
-            unbanScheduler.start();
+        // Replace rather than add: a second reload used to leave the previous scheduler
+        // running, so every expiry was processed twice.
+        if (unbanScheduler != null) {
+            unbanScheduler.stop();
         }
+        unbanScheduler = new UnbanScheduler(this, current, discord);
+        unbanScheduler.start();
 
         getSLF4JLogger().info("Database-dependent components initialized");
     }
 
     /**
-     * Initializes the Discord webhook based on config settings.
+     * Re-initializes the database after a configuration reload.
      */
-    private void initializeDiscord() {
-        boolean discordEnabled = getConfig().getBoolean("discord.enabled", false);
-        String webhookUrl = getConfig().getString("discord.webhookUrl", "");
+    public void reinitializeDatabase() {
+        boolean shouldBeEnabled = getConfig().getBoolean("database.enabled", false);
+        Database current = database;
 
-        if (discordEnabled) {
-            discord = new DiscordWebhook(getSLF4JLogger(), webhookUrl, true);
+        // Always tear down first. Keying off "database != null" alone was wrong: while an
+        // initialization was still running or had failed, the field was null and a reload
+        // started a *second* initialization on top of the first.
+        if (current != null) {
+            getSLF4JLogger().info("Closing the current database connection...");
+            if (unbanScheduler != null) {
+                unbanScheduler.stop();
+                unbanScheduler = null;
+            }
+            database = null;
+            punishmentManager.updateDatabase(null);
+            punishmentManager.clearMuteCache();
+            // Closing waits for in-flight queries, so keep it off the main thread.
+            current.shutdown();
+        }
+
+        if (shouldBeEnabled) {
+            initializeDatabaseAsync();
         } else {
+            getSLF4JLogger().info("Database disabled - using the vanilla ban system.");
+        }
+    }
+
+    // ==================== Discord ====================
+
+    private void initializeDiscord() {
+        Settings.DiscordSettings discordSettings = settings.discord();
+        discord = discordSettings.enabled() ? new DiscordWebhook(getSLF4JLogger(), messages, discordSettings) : null;
+        if (discord == null) {
             getSLF4JLogger().debug("Discord notifications are disabled in config.yml");
-            discord = null;
         }
     }
 
     /**
      * Re-initializes the Discord webhook (called on reload).
-     * Shuts down existing webhook client before creating a new one.
      */
     public void reinitializeDiscord() {
-        getSLF4JLogger().debug("Re-initializing Discord webhook...");
-
-        // Shutdown existing webhook if present
         if (discord != null) {
             discord.shutdown();
-        }
-
-        // Re-initialize with new config
-        boolean discordEnabled = getConfig().getBoolean("discord.enabled", false);
-        String webhookUrl = getConfig().getString("discord.webhookUrl", "");
-
-        if (discordEnabled) {
-            discord = new DiscordWebhook(getSLF4JLogger(), webhookUrl, true);
-        } else {
-            getSLF4JLogger().debug("Discord notifications are disabled in config.yml");
             discord = null;
         }
 
-        // Update punishment manager with new Discord instance
+        Settings.DiscordSettings discordSettings = settings.discord();
+        if (discordSettings.enabled()) {
+            discord = new DiscordWebhook(getSLF4JLogger(), messages, discordSettings);
+        } else {
+            getSLF4JLogger().debug("Discord notifications are disabled in config.yml");
+        }
+
         if (punishmentManager != null) {
             punishmentManager.updateDiscord(discord);
-            getSLF4JLogger().debug("PunishmentManager updated with new Discord webhook");
+        }
+        if (unbanScheduler != null) {
+            unbanScheduler.updateDiscord(discord);
         }
     }
 
     /**
-     * Re-initializes the database (called on reload).
-     * This method handles enabling/disabling the database and changing settings.
+     * Applies a configuration reload to every component that caches settings.
      */
-    public void reinitializeDatabase() {
-        getSLF4JLogger().debug("Re-initializing database...");
+    public void reloadAll() {
+        reloadConfig();
+        ConfigValidator.validate(getConfig(), getSLF4JLogger());
 
-        boolean databaseEnabled = getConfig().getBoolean("database.enabled", false);
-        boolean wasEnabled = (database != null);
-
-        // Case 1: Database was enabled, now disabled
-        if (wasEnabled && !databaseEnabled) {
-            getSLF4JLogger().info("Disabling database...");
-
-            // Stop scheduler
-            if (unbanScheduler != null) {
-                unbanScheduler.stop();
-                unbanScheduler = null;
-            }
-
-            // Shutdown database
-            database.shutdown().join();
-            database = null;
-
-            // Update punishment manager to remove database reference
-            punishmentManager.updateDatabase(null);
-
-            getSLF4JLogger().info("Database disabled. Using vanilla ban system.");
-        }
-        // Case 2: Database was disabled, now enabled OR settings changed
-        else if (!wasEnabled && databaseEnabled) {
-            getSLF4JLogger().info("Enabling database...");
-            initializeDatabaseAsync();
-        }
-        // Case 3: Database was enabled and still enabled (may need to reinit if settings changed)
-        else if (wasEnabled && databaseEnabled) {
-            getSLF4JLogger().debug("Database settings may have changed, reinitializing...");
-
-            // Stop scheduler
-            if (unbanScheduler != null) {
-                unbanScheduler.stop();
-                unbanScheduler = null;
-            }
-
-            // Shutdown old database
-            database.shutdown().join();
-            database = null;
-
-            // Initialize new database
-            initializeDatabaseAsync();
-        }
-        else {
-            getSLF4JLogger().debug("Database remains disabled.");
-        }
+        settings.reload();
+        messages.load();
+        presetManager.reload();
+        jailManager.reload();
+        reinitializeDiscord();
+        reinitializeDatabase();
     }
 
+    // ==================== Hash salt ====================
+
     /**
-     * Generates a unique hash salt if one doesn't exist or is the default value.
-     * Also validates existing salts for minimum security requirements.
+     * Generates an IP hash salt on first start.
+     *
+     * <p>An existing salt is never replaced. The previous version regenerated any salt that
+     * did not use at least three character classes, which silently invalidated every IP hash
+     * already stored - the exact outcome the warning printed right below it told admins to
+     * avoid.
      */
     private void generateHashSaltIfNeeded() {
         String currentSalt = getConfig().getString("privacy.ipHashSalt", "");
+        boolean unset = currentSalt == null || currentSalt.isBlank()
+                || currentSalt.equals("change-me-to-random-salt");
 
-        // Check if salt needs to be generated or is invalid
-        boolean needsNewSalt = currentSalt.isEmpty() ||
-                              currentSalt.equals("change-me-to-random-salt") ||
-                              !isValidSalt(currentSalt);
-
-        if (needsNewSalt) {
-            if (!currentSalt.isEmpty() && !currentSalt.equals("change-me-to-random-salt")) {
-                getSLF4JLogger().warn("⚠ Existing salt is too weak (length: {}). Generating new salt...", currentSalt.length());
+        if (!unset) {
+            if (currentSalt.length() < 16) {
+                getSLF4JLogger().warn("privacy.ipHashSalt is only {} characters long. A longer, random salt is "
+                        + "strongly recommended - but it is kept as-is, because changing it would make every "
+                        + "IP hash already stored unmatchable.", currentSalt.length());
             }
+            return;
+        }
 
-            String newSalt = generateRandomSalt(32);
-            getConfig().set("privacy.ipHashSalt", newSalt);
+        String newSalt = generateRandomSalt(32);
+        getConfig().set("privacy.ipHashSalt", newSalt);
 
-            // Improved error handling for config saving
-            try {
-                saveConfig();
-                getSLF4JLogger().info("Generated unique IP hash salt for this server");
-                getSLF4JLogger().warn("⚠ WICHTIG: Dein Hash-Salt wurde automatisch generiert.");
-                getSLF4JLogger().warn("⚠ Lösche ihn NICHT aus der config.yml, sonst können IPs nicht mehr zugeordnet werden!");
-            } catch (Exception e) {
-                getSLF4JLogger().error("Failed to save config with new hash salt! " +
-                        "Please ensure the plugin has write permissions to the config directory.", e);
-                getSLF4JLogger().error("⚠ IP anonymization may not work correctly until config is writable!");
-                // Don't fail plugin startup - use in-memory salt as fallback
-            }
-        } else {
-            // Salt exists and is valid
-            getSLF4JLogger().info("Using existing IP hash salt (length: {})", currentSalt.length());
+        try {
+            saveConfig();
+            getSLF4JLogger().info("Generated a unique IP hash salt for this server.");
+            getSLF4JLogger().warn("Keep privacy.ipHashSalt in config.yml: deleting or changing it makes "
+                    + "previously stored IP hashes unmatchable.");
+        } catch (Exception e) {
+            getSLF4JLogger().error("Failed to save config.yml with the new hash salt. Check the file permissions "
+                    + "of the plugin folder; IP hashing will not be stable until this is fixed.", e);
         }
     }
 
-    /**
-     * Validates that a salt meets minimum security requirements.
-     *
-     * @param salt The salt to validate
-     * @return true if salt is strong enough, false otherwise
-     */
-    private boolean isValidSalt(String salt) {
-        if (salt == null || salt.length() < 16) {
-            return false; // Minimum 16 characters
-        }
-
-        // Check for sufficient character variety (at least 3 different character types)
-        boolean hasLower = salt.chars().anyMatch(Character::isLowerCase);
-        boolean hasUpper = salt.chars().anyMatch(Character::isUpperCase);
-        boolean hasDigit = salt.chars().anyMatch(Character::isDigit);
-        boolean hasSpecial = salt.chars().anyMatch(ch -> !Character.isLetterOrDigit(ch));
-
-        int variety = (hasLower ? 1 : 0) + (hasUpper ? 1 : 0) + (hasDigit ? 1 : 0) + (hasSpecial ? 1 : 0);
-
-        return variety >= 3; // At least 3 types of characters
-    }
-
-    /**
-     * Generates a random alphanumeric salt.
-     *
-     * @param length The length of the salt
-     * @return A random salt string
-     */
     private String generateRandomSalt(int length) {
-        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*-_=+";
+        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         java.security.SecureRandom random = new java.security.SecureRandom();
         StringBuilder salt = new StringBuilder(length);
-
         for (int i = 0; i < length; i++) {
             salt.append(chars.charAt(random.nextInt(chars.length())));
         }
-
         return salt.toString();
     }
 
-    // Getters
+    // ==================== Getters ====================
 
     public static BanHammerPlugin get() {
         return instance;
@@ -472,16 +440,15 @@ pdcKey = new NamespacedKey(this, "ban_hammer");
         return jailManager;
     }
 
-    public dev.banhammer.plugin.gui.StatisticsGUI getStatisticsGUI() {
+    public StatisticsGUI getStatisticsGUI() {
         return statisticsGUI;
     }
 
-    public dev.banhammer.plugin.preset.PresetManager getPresetManager() {
+    public PresetManager getPresetManager() {
         return presetManager;
     }
 
-    public dev.banhammer.plugin.update.ModrinthUpdateChecker getUpdateChecker() {
+    public ModrinthUpdateChecker getUpdateChecker() {
         return updateChecker;
     }
-
 }

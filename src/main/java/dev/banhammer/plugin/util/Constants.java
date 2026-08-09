@@ -101,13 +101,16 @@ public final class Constants {
     /** Maximum length for player names */
     public static final int MAX_PLAYER_NAME_LENGTH = 16;
 
-    // ===== API =====
+    // ===== STAFF IDENTITY =====
 
-    /** Default REST API port */
-    public static final int DEFAULT_API_PORT = 8080;
+    /**
+     * Synthetic UUID recorded as the acting staff member when a punishment is issued from
+     * the console, RCON or a command block. The nil UUID can never collide with a player.
+     */
+    public static final java.util.UUID CONSOLE_UUID = new java.util.UUID(0L, 0L);
 
-    /** API rate limit requests per minute */
-    public static final int API_RATE_LIMIT = 60;
+    /** Display name recorded alongside {@link #CONSOLE_UUID}. */
+    public static final String CONSOLE_NAME = "Console";
 
     // ===== DISCORD =====
 
@@ -122,6 +125,9 @@ public final class Constants {
 
     /** Discord embed color for mutes (yellow) */
     public static final int DISCORD_COLOR_MUTE = 0xFFFF00;
+
+    /** Maximum length of a Discord embed field value */
+    public static final int DISCORD_FIELD_LIMIT = 1024;
 
     // ===== GUI =====
 

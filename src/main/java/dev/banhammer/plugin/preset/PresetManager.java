@@ -18,7 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * @since 3.0.0
  */
-public class PresetManager {
+public final class PresetManager {
 
     private final BanHammerPlugin plugin;
     private volatile List<BanPreset> presets = List.of();
@@ -56,14 +56,18 @@ public class PresetManager {
                 boolean ipBan = preset.getBoolean("ipBan", false);
                 String sound = preset.getString("sound", "BLOCK_NOTE_BLOCK_PLING");
 
-                Duration duration = parseDuration(durationStr);
+                Duration duration = parsePresetDuration(durationStr);
 
                 BanPreset banPreset = new BanPreset(presetId, displayName, reason, duration, ipBan, sound);
                 loaded.add(banPreset);
 
                 plugin.getSLF4JLogger().info("Loaded preset: {} ({})", displayName, banPreset.getDurationDisplay());
+            } catch (IllegalArgumentException e) {
+                // A preset with an unreadable duration is skipped rather than silently
+                // becoming a permanent ban.
+                plugin.getSLF4JLogger().error("Skipping ban preset '{}': {}", presetId, e.getMessage());
             } catch (Exception e) {
-                plugin.getSLF4JLogger().error("Failed to load preset '{}': {}", presetId, e.getMessage());
+                plugin.getSLF4JLogger().error("Failed to load preset '{}'", presetId, e);
             }
         }
 
@@ -71,6 +75,10 @@ public class PresetManager {
             plugin.getSLF4JLogger().warn("No valid presets loaded! Creating default preset.");
             loaded.add(defaultBanPreset());
         }
+
+        // Selections are indices into the old list; after a reload the same index would
+        // point at a different preset (e.g. a 1h ban selection becoming a permanent ban).
+        activePresetIndex.clear();
 
         // Atomic swap to an immutable snapshot
         presets = List.copyOf(loaded);
@@ -141,20 +149,19 @@ public class PresetManager {
     }
 
     /**
-     * Parses a duration string (e.g., "7d", "1h30m", "PT24H").
-     * Uses the shared DurationParser utility.
+     * Parses a preset duration string (e.g. "7d", "1h30m", "PT24H", "permanent").
      *
-     * @param durationStr The duration string
-     * @return The parsed Duration, or null if permanent/invalid
+     * @param durationStr the duration string
+     * @return the parsed Duration, or {@code null} for an explicitly permanent preset
+     * @throws IllegalArgumentException if the string cannot be understood
      */
-    private Duration parseDuration(String durationStr) {
-        Duration duration = DurationParser.parse(durationStr);
-        if (duration == null && durationStr != null && !durationStr.trim().isEmpty()) {
-            if (!durationStr.equalsIgnoreCase("permanent") && !durationStr.equalsIgnoreCase("perm")) {
-                plugin.getSLF4JLogger().warn("Could not parse duration: '{}'. Use format like '7d', '1h30m', or 'permanent'", durationStr);
-            }
+    private Duration parsePresetDuration(String durationStr) {
+        DurationParser.Result result = DurationParser.parse(durationStr);
+        if (result.isInvalid()) {
+            throw new IllegalArgumentException("invalid duration '" + durationStr
+                    + "' - use a format like '7d', '1h30m' or 'permanent'");
         }
-        return duration;
+        return result.orNullForPermanent();
     }
 
     /* =========================
@@ -184,14 +191,18 @@ public class PresetManager {
                 String durationStr = preset.getString("duration", null);
                 String sound = preset.getString("sound", "BLOCK_NOTE_BLOCK_PLING");
 
-                Duration duration = parseDuration(durationStr);
-
-                KickJailPreset kickJailPreset = new KickJailPreset(presetId, displayName, reason, duration, sound);
+                // No 'duration' key at all means kick. A present key means jail -
+                // including "permanent", which is a permanent jail rather than a kick.
+                KickJailPreset kickJailPreset = (durationStr == null)
+                        ? KickJailPreset.kick(presetId, displayName, reason, sound)
+                        : KickJailPreset.jail(presetId, displayName, reason, parsePresetDuration(durationStr), sound);
                 loaded.add(kickJailPreset);
 
                 plugin.getSLF4JLogger().info("Loaded kick/jail preset: {} ({})", displayName, kickJailPreset.getDurationDisplay());
+            } catch (IllegalArgumentException e) {
+                plugin.getSLF4JLogger().error("Skipping kick/jail preset '{}': {}", presetId, e.getMessage());
             } catch (Exception e) {
-                plugin.getSLF4JLogger().error("Failed to load kick/jail preset '{}': {}", presetId, e.getMessage());
+                plugin.getSLF4JLogger().error("Failed to load kick/jail preset '{}'", presetId, e);
             }
         }
 
@@ -199,6 +210,10 @@ public class PresetManager {
             plugin.getSLF4JLogger().warn("No valid kick/jail presets loaded! Creating default preset.");
             loaded.add(defaultKickJailPreset());
         }
+
+        // Selections are indices into the old list; after a reload the same index would
+        // point at a different preset (e.g. a "Kick" selection silently becoming a jail).
+        activeKickJailPresetIndex.clear();
 
         // Atomic swap to an immutable snapshot
         kickJailPresets = List.copyOf(loaded);
@@ -208,11 +223,10 @@ public class PresetManager {
      * Creates the fallback kick/jail preset used when none are configured.
      */
     private KickJailPreset defaultKickJailPreset() {
-        return new KickJailPreset(
+        return KickJailPreset.kick(
                 "default_kick",
                 "Default Kick",
                 "Kicked by BanHammer",
-                null, // kick
                 "BLOCK_NOTE_BLOCK_PLING"
         );
     }

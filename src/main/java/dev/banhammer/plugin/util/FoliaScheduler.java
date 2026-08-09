@@ -18,9 +18,25 @@ import java.util.concurrent.TimeUnit;
  */
 public final class FoliaScheduler {
 
-    private static boolean folia;
+    /** Written once during startup, read from async tasks - hence volatile. */
+    private static volatile boolean folia;
+
+    /** Resolved lazily; {@code ScheduledTask} only exists on Folia. */
+    private static volatile java.lang.reflect.Method foliaCancelMethod;
 
     private FoliaScheduler() {}
+
+    /**
+     * Runs a task on the main/global thread, silently skipping it if the plugin is being
+     * disabled (Bukkit rejects scheduling for a disabled plugin with an exception, which
+     * would otherwise spam the log during shutdown from in-flight database callbacks).
+     */
+    private static void schedule(Plugin plugin, Runnable task) {
+        if (!plugin.isEnabled()) {
+            return;
+        }
+        Bukkit.getScheduler().runTask(plugin, task);
+    }
 
     /**
      * Detects whether Folia is present. Must be called once during plugin startup.
@@ -51,7 +67,7 @@ public final class FoliaScheduler {
         if (folia) {
             Bukkit.getGlobalRegionScheduler().run(plugin, scheduledTask -> task.run());
         } else {
-            Bukkit.getScheduler().runTask(plugin, task);
+            schedule(plugin, task);
         }
     }
 
@@ -62,7 +78,9 @@ public final class FoliaScheduler {
         if (folia) {
             Bukkit.getGlobalRegionScheduler().runDelayed(plugin, scheduledTask -> task.run(), delayTicks);
         } else {
-            Bukkit.getScheduler().runTaskLater(plugin, task, delayTicks);
+            if (plugin.isEnabled()) {
+                Bukkit.getScheduler().runTaskLater(plugin, task, delayTicks);
+            }
         }
     }
 
@@ -73,10 +91,20 @@ public final class FoliaScheduler {
      * Use for entity-specific operations: teleport, kick, openInventory, etc.
      */
     public static void runOnEntity(Plugin plugin, Entity entity, Runnable task) {
+        runOnEntity(plugin, entity, task, null);
+    }
+
+    /**
+     * Runs a task on the entity's owning region thread (Folia) or the main thread (Paper).
+     *
+     * @param retired run instead of {@code task} if the entity is removed before the task
+     *                executes (Folia only); may be {@code null}
+     */
+    public static void runOnEntity(Plugin plugin, Entity entity, Runnable task, Runnable retired) {
         if (folia) {
-            entity.getScheduler().run(plugin, scheduledTask -> task.run(), null);
+            entity.getScheduler().run(plugin, scheduledTask -> task.run(), retired);
         } else {
-            Bukkit.getScheduler().runTask(plugin, task);
+            schedule(plugin, task);
         }
     }
 
@@ -87,7 +115,9 @@ public final class FoliaScheduler {
         if (folia) {
             entity.getScheduler().runDelayed(plugin, scheduledTask -> task.run(), null, delayTicks);
         } else {
-            Bukkit.getScheduler().runTaskLater(plugin, task, delayTicks);
+            if (plugin.isEnabled()) {
+                Bukkit.getScheduler().runTaskLater(plugin, task, delayTicks);
+            }
         }
     }
 
@@ -100,7 +130,7 @@ public final class FoliaScheduler {
         if (folia) {
             Bukkit.getRegionScheduler().execute(plugin, location, task);
         } else {
-            Bukkit.getScheduler().runTask(plugin, task);
+            schedule(plugin, task);
         }
     }
 
@@ -122,38 +152,63 @@ public final class FoliaScheduler {
     }
 
     /**
-     * Cancels a task handle returned by {@link #runAsyncRepeating(Plugin, Runnable, long, long)}.
+     * Runs a one-off task off the main thread.
      */
-    public static void cancelTask(Object taskHandle) {
-        if (taskHandle == null) return;
+    public static void runAsync(Plugin plugin, Runnable task) {
+        if (folia) {
+            Bukkit.getAsyncScheduler().runNow(plugin, scheduledTask -> task.run());
+        } else if (plugin.isEnabled()) {
+            Bukkit.getScheduler().runTaskAsynchronously(plugin, task);
+        }
+    }
+
+    /**
+     * Cancels a task handle returned by {@link #runAsyncRepeating(Plugin, Runnable, long, long)}.
+     *
+     * @return true if the task was cancelled
+     */
+    public static boolean cancelTask(Object taskHandle) {
+        if (taskHandle == null) return false;
 
         if (taskHandle instanceof BukkitTask bukkitTask) {
             if (!bukkitTask.isCancelled()) {
                 bukkitTask.cancel();
             }
-        } else {
-            // Folia ScheduledTask — use reflection to avoid compile-time dependency
-            try {
-                var cancelMethod = taskHandle.getClass().getMethod("cancel");
-                cancelMethod.invoke(taskHandle);
-            } catch (Exception e) {
-                // Fallback: should not happen
+            return true;
+        }
+
+        // Folia ScheduledTask - resolved reflectively to avoid a compile-time dependency.
+        try {
+            java.lang.reflect.Method cancel = foliaCancelMethod;
+            if (cancel == null) {
+                cancel = taskHandle.getClass().getMethod("cancel");
+                foliaCancelMethod = cancel;
             }
+            cancel.invoke(taskHandle);
+            return true;
+        } catch (Exception e) {
+            // A task that cannot be cancelled keeps running until the server stops, so this
+            // must not be swallowed silently.
+            Bukkit.getLogger().warning("[BanHammer] Failed to cancel scheduled task "
+                    + taskHandle.getClass().getName() + ": " + e);
+            return false;
         }
     }
 
     // ========== Player Operations ==========
 
     /**
-     * Teleports a player asynchronously. On Paper, uses teleportAsync if available,
-     * otherwise falls back to sync teleport. On Folia, uses the entity scheduler.
+     * Teleports a player without blocking the calling thread.
+     *
+     * <p>Uses Paper's {@code teleportAsync} on both platforms: a synchronous
+     * {@code teleport()} into an ungenerated chunk would generate that chunk on the main
+     * thread and stall the whole server for the duration.
+     *
+     * @return a future completing with whether the teleport succeeded
      */
-    public static void teleportAsync(Plugin plugin, Player player, Location destination) {
-        if (folia) {
-            player.teleportAsync(destination);
-        } else {
-            player.teleport(destination);
-        }
+    public static java.util.concurrent.CompletableFuture<Boolean> teleportAsync(
+            Plugin plugin, Player player, Location destination) {
+        return player.teleportAsync(destination);
     }
 
     /**

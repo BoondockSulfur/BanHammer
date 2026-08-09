@@ -21,7 +21,15 @@ public final class ItemFactory {
     public static ItemStack createHammer(BanHammerPlugin plugin) {
         var s = plugin.settings();
         Material mat = Material.matchMaterial(s.itemMaterial());
-        if (mat == null) mat = Material.CARROT_ON_A_STICK;
+        // A configured AIR (or a non-item material) has no ItemMeta, so every /bh give would
+        // fail with a NullPointerException further down.
+        if (mat == null || mat.isAir() || !mat.isItem()) {
+            if (mat != null) {
+                plugin.getSLF4JLogger().warn("item.material '{}' cannot be used as an item - "
+                        + "falling back to CARROT_ON_A_STICK", s.itemMaterial());
+            }
+            mat = Material.CARROT_ON_A_STICK;
+        }
 
         ItemStack item = new ItemStack(mat);
         ItemMeta meta = item.getItemMeta();
@@ -40,7 +48,11 @@ public final class ItemFactory {
         }
 
         if (s.itemCustomModelData() > 0) {
-            meta.setCustomModelData(s.itemCustomModelData());
+            // The data-component form replaces the deprecated integer setter. The float list
+            // is what modern resource packs match on via the "custom_model_data" predicate.
+            var component = meta.getCustomModelDataComponent();
+            component.setFloats(List.of((float) s.itemCustomModelData()));
+            meta.setCustomModelDataComponent(component);
         }
         meta.getPersistentDataContainer().set(plugin.pdcKey(), PersistentDataType.BYTE, HAMMER_PDC_MARKER);
 

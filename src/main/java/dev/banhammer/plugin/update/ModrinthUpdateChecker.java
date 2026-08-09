@@ -6,8 +6,8 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import dev.banhammer.plugin.BanHammerPlugin;
 import dev.banhammer.plugin.util.FoliaScheduler;
+import dev.banhammer.plugin.util.Links;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -29,16 +29,28 @@ import java.util.concurrent.TimeUnit;
 public class ModrinthUpdateChecker {
 
     private static final String MODRINTH_API = "https://api.modrinth.com/v2/project/%s/version";
-    private static final String USER_AGENT = "BanHammer/4.0.1 (GitHub)";
 
     private final BanHammerPlugin plugin;
     private final String projectId;
     private final String currentVersion;
+    private final String userAgent;
     private final String gameVersion;
     private final boolean enabled;
     private final boolean checkOnStartup;
     private final boolean notifyAdmins;
     private final long checkInterval;
+
+    /**
+     * Dedicated worker. The check performs up to two blocking HTTP calls with a 5s timeout
+     * each; running those on the common ForkJoinPool would tie up threads shared with the
+     * server and every other plugin - and on a single-core host that pool has one thread.
+     */
+    private final java.util.concurrent.ExecutorService executor = java.util.concurrent.Executors
+            .newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "BanHammer-UpdateChecker");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     private Object periodicTask;
     // Written on the async update-check thread, read on the main thread (join/notify)
@@ -49,7 +61,10 @@ public class ModrinthUpdateChecker {
 
     public ModrinthUpdateChecker(BanHammerPlugin plugin) {
         this.plugin = plugin;
-        this.currentVersion = plugin.getDescription().getVersion();
+        // Read from the plugin metadata rather than a hard-coded literal, which drifted out
+        // of sync with pom.xml and made the checker compare against the wrong version.
+        this.currentVersion = plugin.getPluginMeta().getVersion();
+        this.userAgent = "BanHammer/" + currentVersion + " (+https://modrinth.com/plugin/bs-banhammer)";
         this.gameVersion = Bukkit.getMinecraftVersion();
         this.enabled = plugin.getConfig().getBoolean("updateChecker.enabled", true);
         this.checkOnStartup = plugin.getConfig().getBoolean("updateChecker.checkOnStartup", true);
@@ -69,15 +84,20 @@ public class ModrinthUpdateChecker {
 
         // Check on startup
         if (checkOnStartup) {
-            checkForUpdates().thenAccept(updateAvailable -> {
-                if (updateAvailable) {
-                    plugin.getSLF4JLogger().warn("=".repeat(60));
-                    plugin.getSLF4JLogger().warn("Update available: {} -> {}", currentVersion, latestVersion);
-                    plugin.getSLF4JLogger().warn("Download: {}", downloadUrl);
-                    plugin.getSLF4JLogger().warn("Changelog: {}", changelogUrl);
-                    plugin.getSLF4JLogger().warn("=".repeat(60));
-                }
-            });
+            checkForUpdates()
+                    .thenAccept(updateAvailable -> {
+                        if (updateAvailable) {
+                            plugin.getSLF4JLogger().warn("=".repeat(60));
+                            plugin.getSLF4JLogger().warn("Update available: {} -> {}", currentVersion, latestVersion);
+                            plugin.getSLF4JLogger().warn("Download: {}", downloadUrl);
+                            plugin.getSLF4JLogger().warn("Changelog: {}", changelogUrl);
+                            plugin.getSLF4JLogger().warn("=".repeat(60));
+                        }
+                    })
+                    .exceptionally(throwable -> {
+                        plugin.getSLF4JLogger().warn("Startup update check failed: {}", throwable.toString());
+                        return null;
+                    });
         }
 
         // Schedule periodic checks
@@ -85,11 +105,16 @@ public class ModrinthUpdateChecker {
             long intervalTicks = checkInterval * 60 * 60 * 20; // Hours to ticks
             periodicTask = FoliaScheduler.runAsyncRepeating(
                     plugin,
-                    () -> checkForUpdates().thenAccept(updateAvailable -> {
-                        if (updateAvailable && notifyAdmins) {
-                            notifyOnlineAdmins();
-                        }
-                    }),
+                    () -> checkForUpdates()
+                            .thenAccept(updateAvailable -> {
+                                if (updateAvailable && notifyAdmins) {
+                                    notifyOnlineAdmins();
+                                }
+                            })
+                            .exceptionally(throwable -> {
+                                plugin.getSLF4JLogger().warn("Periodic update check failed: {}", throwable.toString());
+                                return null;
+                            }),
                     intervalTicks,
                     intervalTicks
             );
@@ -104,8 +129,10 @@ public class ModrinthUpdateChecker {
     public void stop() {
         if (periodicTask != null) {
             FoliaScheduler.cancelTask(periodicTask);
+            periodicTask = null;
             plugin.getSLF4JLogger().info("Update checker stopped");
         }
+        executor.shutdownNow();
     }
 
     /**
@@ -132,6 +159,9 @@ public class ModrinthUpdateChecker {
                 plugin.getSLF4JLogger().debug("No versions found for game version {}, trying unfiltered fallback", gameVersion);
                 JsonArray allVersions = fetchVersions(false);
                 if (allVersions == null || allVersions.isEmpty()) {
+                    // Allow an immediate retry rather than sitting out the full rate-limit
+                    // window after a transient failure.
+                    lastCheck = 0;
                     plugin.getSLF4JLogger().warn("No versions found on Modrinth");
                     return false;
                 }
@@ -142,8 +172,13 @@ public class ModrinthUpdateChecker {
                 }
             }
 
-            // Get latest version
-            JsonObject latestVersionObj = versions.get(0).getAsJsonObject();
+            // Pick the newest by publication date. The API's ordering is not contractual, and
+            // a backported release for an older Minecraft version can otherwise be mistaken
+            // for "latest".
+            JsonObject latestVersionObj = newestByPublishDate(versions);
+            if (latestVersionObj == null) {
+                return false;
+            }
             JsonElement versionElement = latestVersionObj.get("version_number");
             if (versionElement == null || versionElement.isJsonNull()) {
                 plugin.getSLF4JLogger().warn("Modrinth response missing version_number");
@@ -167,7 +202,32 @@ public class ModrinthUpdateChecker {
             plugin.getSLF4JLogger().debug("Current version: {}, Latest version: {}", currentVersion, latestVersion);
 
             return isNewerVersion(latestVersion);
-        });
+        }, executor);
+    }
+
+    /**
+     * Returns the version object with the most recent {@code date_published}.
+     * Modrinth emits ISO-8601 UTC timestamps, which compare correctly as strings.
+     */
+    private JsonObject newestByPublishDate(JsonArray versions) {
+        JsonObject newest = null;
+        String newestDate = null;
+
+        for (JsonElement element : versions) {
+            if (!element.isJsonObject()) {
+                continue;
+            }
+            JsonObject candidate = element.getAsJsonObject();
+            JsonElement published = candidate.get("date_published");
+            String date = (published == null || published.isJsonNull()) ? "" : published.getAsString();
+
+            if (newest == null || date.compareTo(newestDate) > 0) {
+                newest = candidate;
+                newestDate = date;
+            }
+        }
+
+        return newest;
     }
 
     /**
@@ -183,10 +243,10 @@ public class ModrinthUpdateChecker {
             if (filterByGameVersion) {
                 apiUrl += "?game_versions=" + URLEncoder.encode("[\"" + gameVersion + "\"]", StandardCharsets.UTF_8);
             }
-            URL url = new URL(apiUrl);
+            URL url = java.net.URI.create(apiUrl).toURL();
             connection = (HttpURLConnection) url.openConnection();
             connection.setRequestMethod("GET");
-            connection.setRequestProperty("User-Agent", USER_AGENT);
+            connection.setRequestProperty("User-Agent", userAgent);
             connection.setConnectTimeout(5000);
             connection.setReadTimeout(5000);
 
@@ -334,12 +394,26 @@ public class ModrinthUpdateChecker {
                 .append(Component.text(" → ", NamedTextColor.GRAY))
                 .append(Component.text(latestVersion, NamedTextColor.GREEN)));
 
-        if (downloadUrl != null) {
+        Component links = downloadLinks();
+        if (links != null) {
             player.sendMessage(prefix
-                    .append(Component.text("Download: ", NamedTextColor.GRAY))
-                    .append(Component.text(downloadUrl, NamedTextColor.AQUA)
-                            .clickEvent(ClickEvent.openUrl(downloadUrl))));
+                    .append(Component.text("Download here: ", NamedTextColor.GRAY))
+                    .append(links));
         }
+    }
+
+    /**
+     * Builds the clickable provider row, e.g. {@code [Modrinth] [CurseForge]}.
+     *
+     * <p>Falls back to the release URL Modrinth reported when no providers are configured,
+     * so the notification is never left without a way to get the update.
+     */
+    private Component downloadLinks() {
+        Component configured = Links.row(plugin.settings().downloadLinks());
+        if (configured != null) {
+            return configured;
+        }
+        return downloadUrl != null ? Links.label("Download", downloadUrl) : null;
     }
 
     public String getLatestVersion() {

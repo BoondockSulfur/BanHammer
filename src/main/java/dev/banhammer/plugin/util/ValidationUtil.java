@@ -1,9 +1,10 @@
 package dev.banhammer.plugin.util;
 
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
-
-import static dev.banhammer.plugin.util.Constants.MAX_REASON_LENGTH;
 
 /**
  * Utility class for input validation.
@@ -14,6 +15,45 @@ public final class ValidationUtil {
 
     private ValidationUtil() {
         throw new UnsupportedOperationException("Utility class");
+    }
+
+    /**
+     * Compiled word-boundary patterns, cached because filtering runs on every punishment
+     * and re-compiling the whole blocked-word list each time is needless work.
+     */
+    private static final Map<String, Pattern> WORD_PATTERNS = new ConcurrentHashMap<>();
+
+    private static Pattern wordPattern(String word) {
+        return WORD_PATTERNS.computeIfAbsent(word.toLowerCase(Locale.ROOT),
+                w -> Pattern.compile("\\b" + Pattern.quote(w) + "\\b", Pattern.CASE_INSENSITIVE));
+    }
+
+    /**
+     * The reason rules configured for this server, resolved once so every punishment path
+     * (ban, kick, mute, jail, warn) applies the same limits and word filter.
+     *
+     * @param minLength     minimum reason length, 0 for none
+     * @param maxLength     maximum reason length
+     * @param requireReason whether a reason must be supplied
+     * @param filterReasons whether blocked words are masked
+     * @param blockedWords  the blocked-word list (may be empty)
+     */
+    public record ReasonPolicy(int minLength, int maxLength, boolean requireReason,
+                               boolean filterReasons, List<String> blockedWords) {
+
+        public ReasonPolicy {
+            blockedWords = blockedWords == null ? List.of() : List.copyOf(blockedWords);
+        }
+
+        /** Validates a reason against this policy. */
+        public ValidationResult validate(String reason) {
+            return validateReason(reason, minLength, maxLength, requireReason);
+        }
+
+        /** Applies the configured word filter, if enabled. */
+        public String filter(String reason) {
+            return filterReasons ? filterReason(reason, blockedWords) : reason;
+        }
     }
 
     private static final Pattern URL_PATTERN = Pattern.compile(
@@ -55,16 +95,6 @@ public final class ValidationUtil {
     }
 
     /**
-     * Validates a reason with default settings.
-     *
-     * @param reason The reason to validate
-     * @return ValidationResult
-     */
-    public static ValidationResult validateReason(String reason) {
-        return validateReason(reason, 0, MAX_REASON_LENGTH, false);
-    }
-
-    /**
      * Filters offensive words from a reason.
      *
      * @param reason The reason to filter
@@ -80,8 +110,7 @@ public final class ValidationUtil {
         for (String word : blockedWords) {
             if (word == null || word.isEmpty()) continue;
 
-            Pattern pattern = Pattern.compile("\\b" + Pattern.quote(word) + "\\b", Pattern.CASE_INSENSITIVE);
-            filtered = pattern.matcher(filtered).replaceAll("*".repeat(word.length()));
+            filtered = wordPattern(word).matcher(filtered).replaceAll("*".repeat(word.length()));
         }
 
         return filtered;
@@ -99,11 +128,12 @@ public final class ValidationUtil {
             return false;
         }
 
-        String lowerReason = reason.toLowerCase();
         for (String word : blockedWords) {
             if (word == null || word.isEmpty()) continue;
 
-            if (lowerReason.contains(word.toLowerCase())) {
+            // Same word-boundary semantics as filterReason, so "contains" and "filter"
+            // can never disagree about whether a reason is clean.
+            if (wordPattern(word).matcher(reason).find()) {
                 return true;
             }
         }

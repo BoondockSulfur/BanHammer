@@ -7,6 +7,169 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [4.1.0] - 2026-08-08
+
+Result of a full audit of the code base. Nothing in this release adds a new feature for its
+own sake; it makes the existing ones behave as documented.
+
+### 🔒 Security
+
+- **MiniMessage injection through player input.** Every message was built by string
+  substitution and *then* parsed as MiniMessage, so an appeal text such as
+  `<click:run_command:'/op me'>…</click>` became a real clickable component in staff chat -
+  and `/appeal` is available to every player by default. Substituted values are now escaped.
+- **Statistics GUI could be opened without permission.** The GUI was recognised by its window
+  title, so renaming a shulker box to "Leaderboard" and putting an item called "Zurück" inside
+  it opened the staff leaderboard. Menus are now identified by an `InventoryHolder` and every
+  screen re-checks `banhammer.stats`. This also stops BanHammer from cancelling clicks in
+  unrelated inventories that happen to share a word in their title.
+- **`banhammer.bypass` was ignored by all commands.** Only the hammer honoured it, so a
+  moderator with `banhammer.mute` could mute or jail a protected player. There is now a single
+  `canPunish` check used by every path, including self-punishment protection.
+- **`banhammer.ipban` was never checked.** It existed in `plugin.yml` but appeared nowhere in
+  the code; anyone with `banhammer.use` could issue IP bans via a preset.
+- **Webhook token written to the log.** A webhook URL that failed the format check was logged
+  in full - including a valid `canary.discord.com` link. The URL is no longer logged.
+- **Discord markdown injection.** Appeal texts and reasons went unescaped into embed fields,
+  which render markdown, allowing masked links in the staff channel.
+
+### 🐛 Bug fixes
+
+- **An unreadable duration no longer means "permanent".** `/mute Steve 1w`, `/mute Steve 5` or
+  any typo silently produced a *permanent* punishment. Parsing now distinguishes "explicitly
+  permanent" from "not understood" and reports the latter. Weeks, months and years are
+  supported, negative and absurd values are rejected, and the duplicate parser in
+  `PunishmentCommands` (which the actual commands used) is gone.
+- **Auto-ban repeated forever.** The warning count had no `active` filter and no time window,
+  and was never reset, so *every* warning past the threshold triggered another ban. Warnings
+  are now consumed by the ban they trigger and can expire (`warnings.expireAfterDays`).
+- **`/unmute` did nothing without a database.** The cache was only cleared in the database
+  branch, making mutes unliftable on servers running without one.
+- **IP-ban records had no IP.** The address was read *after* the player was kicked, by which
+  time `getAddress()` returns null.
+- **A failed jail was reported as success.** If jailing failed, an active JAIL record was still
+  written and staff were told it worked, while the player walked around free.
+- **`BanList` was modified from async threads** by the unban scheduler and the appeal-approval
+  path. `banned-players.json` is not thread-safe, and on Folia these calls throw outright -
+  auto-unban was simply broken there.
+- **Expired punishments could be processed forever.** A failing database write left the record
+  active, so the same expiry was re-announced to Discord every 60 seconds. Deactivation is now
+  a compare-and-set that runs first; only the winner performs the visible side effects.
+- **Releasing from an unloaded world threw.** `Location#getWorld()` throws rather than
+  returning null once the world is gone, aborting the release after the tracking maps had
+  already been cleared - leaving the player stuck in jail.
+- **MySQL was likely unusable.** The driver was never registered (SQLite did it, MySQL did
+  not), and the shade plugin had no `ServicesResourceTransformer`, so the two drivers'
+  service files overwrote each other in the jar.
+- **No schema migration existed.** `CREATE TABLE IF NOT EXISTS` silently does nothing on an
+  existing table, so a column added by an update only surfaced as "no such column" *after* a
+  punishment had been applied. There is now a schema version and column reconciliation.
+- **MySQL rejected long names.** `VARCHAR(16)` made Geyser/Bedrock names fail with "data too
+  long" while SQLite accepted the identical punishment. Name columns are widened on upgrade.
+- **Staff statistics split on a name change.** Grouping included `staff_name`, so a rename
+  produced two rows for one UUID - the single-staff query then reported only the first.
+- **Errors vanished.** Roughly a dozen database chains had no error handler: with the database
+  down, a ban was applied in-game, the record was lost, and staff got no message at all.
+- **A jailed player could escape during relog.** The enforcement cache was rebuilt only after
+  an async lookup returned; players are now blocked first and released if the lookup says so.
+- **Effects ran before the permission check.** Lightning, sound and knockback were applied and
+  *then* the action was refused - a grief tool for anyone holding a hammer.
+- **Reload was half-applied.** The mute and jail listeners were registered only if enabled at
+  startup, and the blocked-command list, jail location and Essentials toggle needed a full
+  restart. Listeners are always registered and read their configuration per event.
+- Further fixes: double `UnbanScheduler` after a fast double reload; leaked HikariCP pool on
+  initialization timeout; a closed database left wired into the punishment manager; `/bh give`
+  reporting success with a full inventory; `/bh history` loading 1000 rows to show ten; N+1
+  queries when restoring jails; items lost by dragging into the GUI; `AIR` as `item.material`
+  throwing on every `/bh give`.
+
+### ✨ Changed
+
+- **Console replies are delivered.** Command output produced by a database query used to be
+  scheduled for the next tick; RCON closes its connection as soon as the command returns, so
+  those replies were lost without a trace. Replies now go out synchronously when already on the
+  main thread, and an RCON caller's deferred replies are mirrored to the server log.
+- **Console and RCON can punish.** All punishment methods take a `CommandSender`; console
+  actions are attributed to a reserved UUID. **API change:** `getStaff()` on the three
+  BanHammer events now returns `CommandSender`; use `getStaffPlayer()` for a `Player`.
+- **`/appeal` works against any active punishment** (mute, jail, warning, ban), not only bans.
+  Restricted to bans it was unreachable: a banned player cannot log in to type it.
+- **Bans are keyed on the account, not the name.** A name ban is shed by simply renaming, and
+  whoever later claims the freed name inherits it. Bans now go through Paper's profile ban list
+  (UUID + name). Both views write the same `banned-players.json`, so no migration is needed, and
+  pardoning still clears legacy name-only entries left by older versions or vanilla `/ban`.
+- **Download links are clickable labels.** Update and resource-pack notices now read
+  `Download here: [Modrinth] [CurseForge]` instead of printing a raw URL that wraps across
+  lines. Providers are configurable under `downloadLinks` and `resourcePackHint.links`; an
+  entry with an empty URL is hidden.
+- **Message files are kept up to date.** Keys added by a plugin update are now written into the
+  server's `messages_*.yml` (after a one-time `.backup`) and logged, instead of only resolving
+  invisibly against the bundled defaults. Existing values are never overwritten.
+- **The `/banhammer` usage line is generated.** Its subcommands were maintained by hand in three
+  places - dispatch, tab completion and the message text - which is how the usage line kept
+  advertising a `pack` subcommand that no longer exists, forever, on any server whose message
+  file predated its removal. There is now one `Subcommand` list feeding all three, and the usage
+  text only supplies the sentence around a `{commands}` placeholder. It also lists just the
+  subcommands the sender may actually use.
+- **Menus and Discord messages are translatable.** The previously hard-coded English GUI labels
+  and Discord embed titles moved into `messages_*.yml` (`gui:` and `discord:` sections). Menu
+  buttons are identified by data stored on the item, so renaming a label cannot break
+  navigation. The history GUI now pages instead of stopping after 36 entries.
+- **Configuration is honest.** Options that were documented but never read are now implemented:
+  `logging.*`, `privacy.dataRetention.*`, `discord.notifications.*`, `discord.showStaffName`,
+  `discord.showServerName`, `tempBans.notifyOnExpire`, `ipBan.enabled`, `ipBan.autoIpBan`,
+  `database.sqlite.file`, `item.giveOnJoin`, `validation.requireReason`. Options superseded by
+  the preset system (`ban.mode`, `ban.reason`, `ban.duration`, `kick.*`) were removed.
+- **`config-enhanced.yml` deleted.** It described a REST API, Redis, LuckPerms/Vault hooks,
+  WorldGuard region bans and "ML ban evasion" - none of which exist - while omitting the
+  features that do. `config.yml` is now the single, accurate reference.
+- **IP hashing uses HMAC-SHA256** instead of an unkeyed `SHA-256(ip + salt)`, and the
+  documentation no longer calls it anonymisation: with the salt it is reversible.
+- The IP hash salt is no longer silently regenerated. The old strength check replaced any
+  admin-chosen salt that lacked three character classes, invalidating every stored hash -
+  exactly what the warning printed beside it told admins to avoid.
+- Mutes now also cover signs and books (`mute.preventSigns`, `mute.preventBooks`).
+- Muted or jailed players keep access to `/appeal` and private messages.
+
+### 📦 Packaging
+
+- **The jar shrank from 22 MB to ~266 KB.** HikariCP, both JDBC drivers, Gson and the Discord
+  webhook library (which drags in OkHttp and the Kotlin stdlib) are now declared under
+  `libraries:` in `plugin.yml`: Paper resolves them from Maven Central on first start and loads
+  them in an isolated class loader. That also removes every hand-maintained relocation and any
+  possibility of clashing with another plugin's copy of the same library.
+  **Note:** the server needs internet access the first time it starts this version; the
+  artifacts are then cached in the server's `libraries` folder.
+
+### ✅ Quality
+
+- **Test suite added** - 52 tests, including integration tests that run the SQL layer against a
+  real SQLite database: schema creation, migration from a pre-4.1 schema, the compare-and-set
+  updates, the warning window, statistics grouping after a name change, and the retention purge.
+- **Verified on a live server** - Paper 26.1.2 on Java 25, upgrading in place from 4.0.1 with an
+  existing SQLite database: the runtime library loading, the schema migration (11 existing
+  records preserved), the Essentials hook, `/bh reload`, and the history and statistics commands
+  were all exercised end to end.
+- **Compiler diagnostics** - `-Xlint:all` is on and the build is warning-free. A SpotBugs setup
+  is included behind `-Pstatic-analysis`; it is off by default only because SpotBugs cannot yet
+  read Java 25 bytecode.
+
+### 🔧 Internal
+
+- SQLite and MySQL share one `AbstractSqlDatabase`; all queries exist exactly once, which is
+  what stopped the two backends from drifting apart.
+- Database work runs on a dedicated bounded thread pool instead of the common ForkJoinPool.
+- Settings are read once per reload into an immutable snapshot, so async tasks no longer read
+  a `FileConfiguration` that `/bh reload` is replacing underneath them.
+- `teleportAsync` no longer performs a synchronous teleport on Paper (chunk generation on the
+  main thread).
+- Essentials reflection is resolved and cached at startup, with a compatibility check, instead
+  of being re-resolved on every movement packet.
+- Dead code removed (`ReflectionUtil`, `Hex`, unused constants); Paper API version pinned;
+  OkHttp, Okio and the Kotlin stdlib are now relocated.
+
+---
+
 ## [4.0.1] - 2026-06-03
 
 ### 🐛 Bug Fixes

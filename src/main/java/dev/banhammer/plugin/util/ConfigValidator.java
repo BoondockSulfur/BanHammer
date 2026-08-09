@@ -43,14 +43,14 @@ public final class ConfigValidator {
         // Validate Discord settings
         validateDiscord(config, warnings, errors);
 
-        // Validate API settings
-        validateApi(config, warnings, errors);
-
         // Validate privacy settings
         validatePrivacy(config, warnings, errors);
 
         // Validate jail settings
         validateJail(config, warnings, errors);
+
+        // Validate everything else that can silently misbehave at runtime
+        validateMisc(config, warnings, errors);
 
         // Log all warnings
         if (!warnings.isEmpty()) {
@@ -94,20 +94,30 @@ public final class ConfigValidator {
             return; // Database disabled, skip validation
         }
 
-        String type = config.getString("database.type", "SQLITE").toUpperCase();
-        if (!type.equals("SQLITE") && !type.equals("MYSQL")) {
-            errors.add("Invalid database.type: " + type + " (must be SQLITE or MYSQL)");
+        String type = str(config, "database.type", "SQLITE").trim().toUpperCase(java.util.Locale.ROOT);
+        if (!type.equals("SQLITE") && !type.equals("MYSQL") && !type.equals("MARIADB")) {
+            errors.add("Invalid database.type: " + type + " (must be SQLITE, MYSQL or MARIADB)");
         }
 
-        if (type.equals("MYSQL")) {
-            String host = config.getString("database.mysql.host", "");
-            if (host.isEmpty()) {
+        if (type.equals("MYSQL") || type.equals("MARIADB")) {
+            String host = str(config, "database.mysql.host", "");
+            if (host.isBlank()) {
                 errors.add("database.mysql.host is required when using MySQL");
             }
 
-            String password = config.getString("database.mysql.password", "password");
+            int port = config.getInt("database.mysql.port", 3306);
+            if (port < 1 || port > 65535) {
+                errors.add("database.mysql.port must be between 1 and 65535 (found: " + port + ")");
+            }
+
+            String database = str(config, "database.mysql.database", "");
+            if (database.isBlank()) {
+                errors.add("database.mysql.database is required when using MySQL");
+            }
+
+            String password = str(config, "database.mysql.password", "");
             if (password.equals("password")) {
-                warnings.add("database.mysql.password is set to default 'password'. Change this for security!");
+                warnings.add("database.mysql.password is still the default 'password'. Change it!");
             }
         }
 
@@ -162,51 +172,91 @@ public final class ConfigValidator {
             return; // Discord disabled, skip validation
         }
 
-        String webhookUrl = config.getString("discord.webhookUrl", "");
-        if (webhookUrl.isEmpty()) {
+        String webhookUrl = str(config, "discord.webhookUrl", "");
+        if (webhookUrl.isBlank()) {
             errors.add("discord.webhookUrl is required when Discord is enabled");
-        } else if (!webhookUrl.startsWith("https://discord.com/api/webhooks/") &&
-                   !webhookUrl.startsWith("https://discordapp.com/api/webhooks/")) {
-            warnings.add("discord.webhookUrl doesn't look like a valid Discord webhook URL");
-        }
-    }
-
-    private static void validateApi(FileConfiguration config, List<String> warnings, List<String> errors) {
-        if (!config.getBoolean("api.enabled", false)) {
-            return; // API disabled, skip validation
-        }
-
-        int port = config.getInt("api.port", 8080);
-        if (port < 1024 || port > 65535) {
-            warnings.add("api.port " + port + " is in reserved range or invalid. Use ports 1024-65535.");
-        }
-
-        String token = config.getString("api.token", "your-secret-token");
-        if (token.equals("your-secret-token") || token.length() < 16) {
-            warnings.add("api.token is weak or default. Use a strong token (16+ characters) for security!");
-        }
-
-        int rateLimit = config.getInt("api.rateLimit.requestsPerMinute", 60);
-        if (rateLimit < 1) {
-            errors.add("api.rateLimit.requestsPerMinute must be at least 1");
+        } else if (!webhookUrl.trim().matches(
+                "^https://(canary\\.|ptb\\.)?discord(app)?\\.com/api(/v\\d+)?/webhooks/\\d+/[\\w-]+$")) {
+            // Never echo the value: it contains the webhook token.
+            warnings.add("discord.webhookUrl does not look like a valid Discord webhook URL");
         }
     }
 
     private static void validatePrivacy(FileConfiguration config, List<String> warnings, List<String> errors) {
-        String anonymizationLevel = config.getString("privacy.ipAnonymization", "PARTIAL");
+        String anonymizationLevel = str(config, "privacy.ipAnonymization", "PARTIAL");
         try {
-            IPAnonymizer.AnonymizationLevel.valueOf(anonymizationLevel.toUpperCase());
+            IPAnonymizer.AnonymizationLevel.valueOf(anonymizationLevel.trim().toUpperCase(java.util.Locale.ROOT));
         } catch (IllegalArgumentException e) {
-            errors.add("Invalid privacy.ipAnonymization: " + anonymizationLevel +
-                    " (must be NONE, PARTIAL, FULL, or HASH)");
+            warnings.add("Invalid privacy.ipAnonymization: '" + anonymizationLevel
+                    + "' (must be NONE, PARTIAL, HASH or FULL) - falling back to PARTIAL");
         }
 
-        String salt = config.getString("privacy.ipHashSalt", "");
-        if (salt.isEmpty()) {
-            // This is OK - will be auto-generated
-        } else if (salt.equals("change-me-to-random-salt")) {
-            warnings.add("privacy.ipHashSalt is set to default value. Will be auto-generated.");
+        String salt = str(config, "privacy.ipHashSalt", "");
+        if (salt.equals("change-me-to-random-salt") || salt.isBlank()) {
+            warnings.add("privacy.ipHashSalt is unset - a random salt will be generated on first start.");
         }
+
+        int retentionDays = config.getInt("privacy.dataRetention.deleteAfterDays", 365);
+        if (config.getBoolean("privacy.dataRetention.enabled", false) && retentionDays < 1) {
+            errors.add("privacy.dataRetention.deleteAfterDays must be at least 1 (found: " + retentionDays + ")");
+        }
+    }
+
+    /**
+     * Checks the remaining values that would otherwise only reveal themselves as odd
+     * behaviour at runtime.
+     */
+    private static void validateMisc(FileConfiguration config, List<String> warnings, List<String> errors) {
+        String language = str(config, "language", "en");
+        if (!language.matches("[a-zA-Z0-9_-]{1,16}")) {
+            warnings.add("language '" + language + "' is not a plain language code - falling back to 'en'");
+        }
+
+        String material = str(config, "item.material", "CARROT_ON_A_STICK");
+        org.bukkit.Material parsed = org.bukkit.Material.matchMaterial(material);
+        if (parsed == null) {
+            warnings.add("item.material '" + material + "' is unknown - falling back to CARROT_ON_A_STICK");
+        } else if (parsed.isAir() || !parsed.isItem()) {
+            warnings.add("item.material '" + material + "' cannot exist as an item - "
+                    + "falling back to CARROT_ON_A_STICK");
+        }
+
+        int maxReason = config.getInt("validation.maxReasonLength", 500);
+        if (maxReason < 1) {
+            errors.add("validation.maxReasonLength must be at least 1 (found: " + maxReason + ")");
+        }
+
+        int minAppeal = config.getInt("appeals.minLength", 20);
+        if (minAppeal > maxReason) {
+            warnings.add("appeals.minLength (" + minAppeal + ") exceeds validation.maxReasonLength ("
+                    + maxReason + ") - no appeal could ever satisfy both, so minLength will be clamped.");
+        }
+
+        int checkInterval = config.getInt("tempBans.checkInterval", 60);
+        if (checkInterval < 5) {
+            warnings.add("tempBans.checkInterval (" + checkInterval + "s) is very low and will be raised to 5s.");
+        }
+
+        long updateInterval = config.getLong("updateChecker.checkInterval", 6);
+        if (updateInterval < 0) {
+            warnings.add("updateChecker.checkInterval cannot be negative - periodic checks are disabled.");
+        }
+
+        int threshold = config.getInt("punishmentTypes.warnings.autoBanThreshold", 3);
+        if (threshold < 1) {
+            errors.add("punishmentTypes.warnings.autoBanThreshold must be at least 1 (found: " + threshold + ")");
+        }
+
+        String autoBanDuration = str(config, "punishmentTypes.warnings.autoBanDuration", "7d");
+        if (!DurationParser.isValid(autoBanDuration)) {
+            errors.add("Invalid punishmentTypes.warnings.autoBanDuration: '" + autoBanDuration + "'");
+        }
+    }
+
+    /** Null-safe string read; a key explicitly set to {@code null} would otherwise NPE. */
+    private static String str(FileConfiguration config, String path, String def) {
+        String value = config.getString(path, def);
+        return value == null ? def : value;
     }
 
     private static void validateJail(FileConfiguration config, List<String> warnings, List<String> errors) {
@@ -224,12 +274,15 @@ public final class ConfigValidator {
         // Validate world exists
         String worldName = jailLocation.getString("world");
         if (worldName == null || worldName.isEmpty()) {
-            errors.add("punishmentTypes.jail.location.world is not set");
+            warnings.add("punishmentTypes.jail.location.world is not set - use /setjail");
             return;
         }
 
+        // A warning, not an error: the built-in jail simply stays unavailable (and Essentials
+        // may be providing the cells anyway), so this must not fail the whole validation.
         if (org.bukkit.Bukkit.getWorld(worldName) == null) {
-            errors.add("punishmentTypes.jail.location.world '" + worldName + "' does not exist on this server");
+            warnings.add("punishmentTypes.jail.location.world '" + worldName + "' does not exist on this server - "
+                    + "the built-in jail is unavailable until /setjail is used again");
         }
 
         // Validate coordinates are reasonable

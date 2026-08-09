@@ -1,4 +1,4 @@
-# BanHammer 4.0.0 - Enhanced Edition
+# BanHammer 4.1.0 - Enhanced Edition
 
 <div align="center">
 
@@ -33,7 +33,9 @@
 
 BanHammer is a powerful moderation plugin for Minecraft Paper servers that provides a special "Ban Hammer" item. With this, administrators can ban or kick players in a dramatic and entertaining way - including lightning, particles, and sound effects!
 
-**Version 4.0.0** brings massive enhancements:
+**Version 4.1.0** is a correctness release on top of 4.0: see `CHANGELOG.md` for the full list.
+
+**Highlights since 3.x:**
 - ✅ **Paper 26.1.x Support** - Fully modernized for the new Minecraft versioning
 - ✅ **Folia Support** - Dual-compatible with Paper and Folia from a single JAR
 - ✅ **Ban Presets System** - Quick switching between predefined ban types
@@ -230,10 +232,14 @@ kickJailPresets:
 punishmentTypes:
   mute:
     enabled: true
-    defaultDuration: "1h"
     preventChat: true
     preventCommands: true
+    # A sign or a book is a chat channel too
+    preventSigns: true
+    preventBooks: true
 ```
+
+A muted player keeps access to `/appeal`, so they can always contest the punishment.
 
 **Jail System:**
 ```yaml
@@ -242,6 +248,9 @@ punishmentTypes:
     enabled: true
     preventTeleport: true
     preventDamage: true
+    # Only /appeal, /help and private messages remain usable
+    preventCommands: false
+    maxDistance: 10.0
 ```
 
 **Essentials Jail Integration:**
@@ -263,7 +272,62 @@ punishmentTypes:
     enabled: true
     autoBanThreshold: 3
     autoBanDuration: "7d"
+    # Warnings older than this stop counting (0 = never expire)
+    expireAfterDays: 90
 ```
+
+The warnings that trigger an auto-ban are consumed by it, so the counter starts over rather
+than banning the player again on every subsequent warning.
+
+### ⏱️ Duration Syntax
+
+Every command and preset that takes a duration accepts the same format:
+
+| Unit | Meaning | Example |
+|---|---|---|
+| `s` | seconds | `45s` |
+| `m` | minutes | `30m` |
+| `h` | hours | `1h30m` |
+| `d` | days | `7d` |
+| `w` | weeks | `2w` |
+| `mo` | months (30 days) | `3mo` |
+| `y` | years (365 days) | `1y` |
+
+ISO-8601 (`PT24H`, `P7D`) works as well, and `permanent` / `perm` never expires.
+
+> Anything that cannot be understood is **rejected with an error**. A typo such as
+> `/mute Steve 1woche` will not silently become a permanent punishment.
+
+### 🔒 Privacy & Data Retention
+
+```yaml
+privacy:
+  # NONE | PARTIAL | HASH | FULL
+  ipAnonymization: "PARTIAL"
+  ipHashSalt: "generated on first start"
+
+  dataRetention:
+    enabled: false
+    deleteAfterDays: 365
+    keepActivePunishments: true
+```
+
+| Level | Stored | Reversible |
+|---|---|---|
+| `NONE` | the full address | - |
+| `PARTIAL` | last octet dropped (`192.168.1.0`) | no |
+| `HASH` | keyed digest (HMAC-SHA256) | **yes, by anyone who knows the salt** |
+| `FULL` | masked entirely | no |
+
+`HASH` lets you correlate repeat offenders without storing the address, but it is
+pseudonymisation, not anonymisation - treat `ipHashSalt` as a secret and never change it, or
+every hash already stored stops matching.
+
+> With any level other than `NONE`, an IP ban cannot be lifted automatically, because the
+> stored value is no longer the real address. Use `/pardon-ip` in that case.
+
+`dataRetention` **deletes** punishment history older than `deleteAfterDays`. It is off by
+default; switch it on only if you want that.
 
 ### 🎨 Discord Integration
 
@@ -302,19 +366,34 @@ updateChecker:
 - Periodic checks (configurable interval)
 - Admin notifications on login (with permission)
 - **Game version filtering** - 1.21.x users won't see 26.x updates and vice versa
-- Clickable download links
+- Clickable download links, shown as `Download here: [Modrinth] [CurseForge]`
+
+Configure which providers appear (an entry with an empty URL is hidden):
+
+```yaml
+downloadLinks:
+  Modrinth: "https://modrinth.com/plugin/bs-banhammer"
+  CurseForge: ""
+```
+
+The resource pack hint uses the same format under `resourcePackHint.links`, and can be turned
+off entirely with `resourcePackHint.enabled: false`.
 
 ### 📝 Ban Appeals
 
 ```yaml
 appeals:
   enabled: true
-  allowIngame: true
+  minLength: 20
   cooldown: 24  # hours
   maxAppealsPerPunishment: 3
 ```
 
-Players can submit appeals with `/appeal <text>`, staff can review them with `/bh appeals`.
+Players contest an **active** punishment (mute, jail, warning or ban) with `/appeal <text>`;
+staff review them with `/bh appeals`, `/bh approve <id>` and `/bh deny <id>`.
+
+> Note: a banned player cannot log in, so in-game appeals are in practice used for mutes,
+> jails and warnings. Approving an appeal also lifts a matching ban if one is recorded.
 
 ### 📈 Statistics & Leaderboards
 
@@ -337,6 +416,7 @@ language: "en"  # or "de"
 **Custom Events:**
 ```java
 // Fired BEFORE a player is punished (cancellable)
+// Since 4.1.0 `staff` is a CommandSender, so console punishments are covered too.
 PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, type, reason, duration);
 
 // Fired AFTER a player was punished
@@ -375,7 +455,14 @@ pm.getHistory(playerUuid, 50)
 
 2. **Install Plugin:**
    ```bash
-   cp banhammer-4.0.0.jar server/plugins/
+   cp banhammer-4.1.0.jar server/plugins/
+   ```
+
+   > The plugin jar is ~266 KB. Its database and Discord libraries are downloaded from Maven
+   > Central by Paper on first start and cached in the server's `libraries` folder, so the
+   > server needs internet access once.
+
+   ```bash
    ```
 
 3. **Download Resource Pack (optional):**
@@ -404,10 +491,10 @@ pm.getHistory(playerUuid, 50)
 | `/appeal <text>` | Submit appeal | `banhammer.appeal` |
 | `/mute <player> <duration> [reason]` | Mute a player | `banhammer.mute` |
 | `/unmute <player> [reason]` | Unmute a player | `banhammer.mute` |
-| `/jail <player> <duration> [reason]` | Jail a player | `banhammer.jail` |
+| `/jail <player> <duration> [cell] [reason]` | Jail a player (`[cell]` only with EssentialsX) | `banhammer.jail` |
 | `/unjail <player> [reason]` | Release from jail | `banhammer.jail` |
 | `/setjail` | Set jail location | `banhammer.setjail` |
-| `/warn <player> [reason]` | Warn a player | `banhammer.warn` |
+| `/warn <player> <reason>` | Warn a player | `banhammer.warn` |
 
 **Alias:** `/bh` is shorthand for `/banhammer`
 
@@ -425,11 +512,12 @@ pm.getHistory(playerUuid, 50)
 | `banhammer.history` | Can view history | op |
 | `banhammer.history.others` | Can view others' history | op |
 | `banhammer.unban` | Can unban players | op |
-| `banhammer.stats` | Can view statistics | op |
+| `banhammer.stats` | Can view statistics and the GUI | op |
+| `banhammer.stats.others` | Can view other players' statistics | op |
 | `banhammer.appeals` | Can view appeals | op |
 | `banhammer.appeals.review` | Can review appeals | op |
 | `banhammer.appeal` | Can submit appeals | true |
-| `banhammer.ipban` | Can issue IP bans | op |
+| `banhammer.ipban` | Can issue IP bans with the hammer | op |
 | `banhammer.mute` | Can mute players | op |
 | `banhammer.jail` | Can jail players | op |
 | `banhammer.setjail` | Can set jail location | op |
@@ -449,15 +537,17 @@ item:
   name: "<gold>Ban Hammer</gold>"
   customModelData: 812345
 
-# Ban settings
+# Ban settings (reason and duration come from the presets)
 ban:
-  enabled: true
-  reason: "You were struck by the BanHammer."
-  duration: "permanent"  # or: 7d, 1h30m, PT24H
   broadcast: true
+
+# Give the hammer to staff on join
+item:
+  giveOnJoin: false
 
 # Cooldown in seconds
 cooldownSeconds: 3
+presetSwitchCooldown: 250
 
 # Effects
 effects:
@@ -468,7 +558,8 @@ effects:
 
 ### Advanced Configuration
 
-See `config-enhanced.yml` for ALL available options with detailed documentation.
+`config.yml` documents every option inline. Every key it contains is read by the plugin -
+there are no placeholder settings.
 
 **Most Important Options:**
 
@@ -532,7 +623,9 @@ database:
     port: 3306
     database: "banhammer"
     username: "root"
-    password: "password"
+    password: ""
+    # Require an encrypted connection; leave false for a database on localhost
+    useSsl: false
 ```
 
 **MySQL Advantages:**
@@ -641,12 +734,32 @@ database:
 <details>
 <summary><b>How do I create temporary bans?</b></summary>
 
-Set a duration in config.yml:
+Duration comes from the ban preset you have selected, or from the command argument:
+
 ```yaml
-ban:
-  duration: "7d"  # 7 days
-  # Or: "1h30m", "PT24H", etc.
+presets:
+  temp_7d:
+    displayName: "7 Days Ban"
+    reason: "Temporary ban - 7 days"
+    duration: "7d"      # 30m, 1h30m, 2w, 3mo, permanent, PT24H ...
 ```
+
+Cycle presets with Shift + Right-Click and apply with Right-Click on a player. `/mute` and
+`/jail` take the duration directly as an argument.
+
+> The old `ban.duration` / `ban.reason` settings were removed in 4.1.0 - the preset system
+> replaced them.
+</details>
+
+<details>
+<summary><b>Why does the plugin download files on first start?</b></summary>
+
+Since 4.1.0 the database drivers, HikariCP and the Discord webhook library are declared under
+`libraries:` in `plugin.yml`. Paper fetches them from Maven Central on first start and caches
+them in the server's `libraries` folder, which keeps the plugin jar at ~266 KB instead of 22 MB
+and prevents clashes with other plugins shipping the same libraries.
+
+The server therefore needs internet access once. Afterwards it starts offline as usual.
 </details>
 
 <details>
