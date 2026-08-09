@@ -5,6 +5,7 @@ import dev.banhammer.plugin.database.Database;
 import dev.banhammer.plugin.database.model.PunishmentRecord;
 import dev.banhammer.plugin.database.model.PunishmentType;
 import dev.banhammer.plugin.integration.EssentialsJailIntegration;
+import dev.banhammer.plugin.listener.JailListener;
 import dev.banhammer.plugin.util.FoliaScheduler;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -13,7 +14,11 @@ import org.bukkit.entity.Player;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -22,288 +27,322 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * @since 3.0.0
  */
-public class JailManager {
+public final class JailManager {
 
     private final BanHammerPlugin plugin;
     private final EssentialsJailIntegration essentialsJail;
-    private final Map<UUID, Location> jailedPlayers = new ConcurrentHashMap<>();
+
+    /** Who is currently jailed. The value was never read, so this is a set. */
+    private final Set<UUID> jailedPlayers = ConcurrentHashMap.newKeySet();
+
+    /** Where to put a player back when they are released. */
     private final Map<UUID, Location> returnLocations = new ConcurrentHashMap<>();
-    private Location jailLocation;
+
+    /** Expiry timestamps (epoch millis) for temporary jails. */
+    private final Map<UUID, Long> jailExpiry = new ConcurrentHashMap<>();
+
+    private volatile Location jailLocation;
+    private volatile JailListener jailListener;
     private Object cleanupTask;
     private Object expiryTask;
-    // Expiry timestamps (epoch millis) for temporary jails — enables auto-release
-    // even without a database (the UnbanScheduler only runs when a DB is enabled).
-    private final Map<UUID, Long> jailExpiry = new ConcurrentHashMap<>();
 
     public JailManager(BanHammerPlugin plugin, EssentialsJailIntegration essentialsJail) {
         this.plugin = plugin;
         this.essentialsJail = essentialsJail;
         loadJailLocation();
+    }
+
+    /**
+     * Starts the background tasks.
+     *
+     * <p>Deliberately not done in the constructor: scheduling hands {@code this} to another
+     * thread before construction has finished, which is exactly the publication hazard
+     * {@code -Xlint:this-escape} warns about.
+     */
+    public void start() {
         startCleanupTask();
         startExpiryTask();
+    }
+
+    /**
+     * Injects the enforcement listener.
+     *
+     * <p>Replaces walking the plugin's {@code HandlerList} on every jail and release, which
+     * was both wasteful and fragile - and silently did nothing when the listener had not been
+     * registered because the jail system was disabled.
+     */
+    public void setJailListener(JailListener jailListener) {
+        this.jailListener = jailListener;
+    }
+
+    /**
+     * Re-reads the jail location from the configuration (called on {@code /bh reload}).
+     */
+    public void reload() {
+        loadJailLocation();
     }
 
     private void loadJailLocation() {
         ConfigurationSection jailConfig = plugin.getConfig().getConfigurationSection("punishmentTypes.jail.location");
 
-        if (jailConfig != null) {
-            String worldName = jailConfig.getString("world");
-            double x = jailConfig.getDouble("x");
-            double y = jailConfig.getDouble("y");
-            double z = jailConfig.getDouble("z");
-            float yaw = (float) jailConfig.getDouble("yaw", 0.0);
-            float pitch = (float) jailConfig.getDouble("pitch", 0.0);
+        if (jailConfig == null) {
+            plugin.getSLF4JLogger().warn("Jail location not configured. Use /setjail to set it.");
+            jailLocation = null;
+            return;
+        }
 
-            if (worldName != null && Bukkit.getWorld(worldName) != null) {
-                jailLocation = new Location(Bukkit.getWorld(worldName), x, y, z, yaw, pitch);
-                plugin.getSLF4JLogger().info("Jail location loaded: " + worldName + " " + x + "," + y + "," + z);
-            } else {
-                plugin.getSLF4JLogger().warn("Jail location world not found or not configured. Jail system disabled.");
-            }
+        String worldName = jailConfig.getString("world");
+        double x = jailConfig.getDouble("x");
+        double y = jailConfig.getDouble("y");
+        double z = jailConfig.getDouble("z");
+        float yaw = (float) jailConfig.getDouble("yaw", 0.0);
+        float pitch = (float) jailConfig.getDouble("pitch", 0.0);
+
+        if (worldName != null && Bukkit.getWorld(worldName) != null) {
+            jailLocation = new Location(Bukkit.getWorld(worldName), x, y, z, yaw, pitch);
+            plugin.getSLF4JLogger().info("Jail location loaded: {} {},{},{}", worldName, x, y, z);
         } else {
-            plugin.getSLF4JLogger().warn("Jail location not configured. Use /bh setjail to set it.");
+            jailLocation = null;
+            plugin.getSLF4JLogger().warn("Jail world '{}' not found - the built-in jail is unavailable "
+                    + "until /setjail is used again.", worldName);
         }
     }
 
+    // ==================== Jailing ====================
+
     /**
-     * Jails a player and registers an in-memory expiry for temporary jails.
-     * This makes timed jails auto-release even when no database is configured.
+     * Jails a player and registers an expiry for temporary jails.
      *
      * @param player   the player to jail
-     * @param duration the jail duration (null = permanent)
-     * @return true if successful, false if jail location not set
+     * @param duration the jail duration, or {@code null} for permanent
+     * @return true if the player was jailed
      */
     public boolean jailPlayer(Player player, Duration duration) {
         return jailPlayer(player, duration, null);
     }
 
     /**
-     * Jails a player into a specific Essentials cell and registers an in-memory expiry
-     * for temporary jails.
+     * Jails a player into a specific Essentials cell.
      *
      * @param player   the player to jail
-     * @param duration the jail duration (null = permanent)
-     * @param cellName the Essentials cell to use, or null for the configured default
-     * @return true if successful
+     * @param duration the jail duration, or {@code null} for permanent
+     * @param cellName the Essentials cell to use, or {@code null} for the configured default
+     * @return true if the player was jailed
      */
     public boolean jailPlayer(Player player, Duration duration, String cellName) {
-        boolean ok = jailPlayer(player, cellName);
-        if (ok) {
-            // The in-memory expiry is only a fallback for setups WITHOUT a database.
-            // With a database the UnbanScheduler is the sole authority for expiry, so tracking
-            // it here too would never be consumed (checkInMemoryExpiry skips when a DB is on)
-            // and the entry would leak. Only register it in the no-database case.
-            boolean timed = duration != null && !duration.isZero() && !duration.isNegative();
-            if (timed && !plugin.getPunishmentManager().isDatabaseEnabled()) {
-                jailExpiry.put(player.getUniqueId(), System.currentTimeMillis() + duration.toMillis());
-            } else {
-                jailExpiry.remove(player.getUniqueId()); // permanent or DB-managed: no in-memory expiry
-            }
+        boolean ok = jailPlayer(player, cellName, duration);
+        if (!ok) {
+            return false;
         }
-        return ok;
+
+        boolean timed = duration != null && !duration.isZero() && !duration.isNegative();
+        if (timed) {
+            // Tracked unconditionally. Making this conditional on the database being reachable
+            // at this exact moment meant a brief outage produced a timed jail that nothing
+            // would ever release. The unban scheduler stays authoritative when a database is
+            // present; this is a harmless second safety net, and releases are idempotent.
+            jailExpiry.put(player.getUniqueId(), System.currentTimeMillis() + duration.toMillis());
+        } else {
+            jailExpiry.remove(player.getUniqueId());
+        }
+        return true;
     }
 
     /**
-     * Jails a player by teleporting them to the jail location.
-     * Prefers Essentials jail if available, otherwise uses built-in jail system.
+     * Jails a player using the configured default cell.
      *
-     * @param player The player to jail
-     * @return true if successful, false if jail location not set
+     * @return true if the player was jailed
      */
     public boolean jailPlayer(Player player) {
-        return jailPlayer(player, (String) null);
+        return jailPlayer(player, null, (String) null);
     }
 
     /**
      * Jails a player, optionally into a specific Essentials cell.
-     * Prefers Essentials jail if available, otherwise uses the built-in jail system.
      *
-     * @param player   The player to jail
-     * @param cellName The Essentials cell to use, or null for the configured default
-     * @return true if successful, false if jailing failed
+     * @param player   the player to jail
+     * @param cellName the Essentials cell to use, or {@code null} for the configured default
+     * @param duration the jail duration, passed on to Essentials so its own timeout matches
+     * @return true if the player was jailed
      */
-    public boolean jailPlayer(Player player, String cellName) {
-        // Try Essentials first if available
+    private boolean jailPlayer(Player player, String cellName, Duration duration) {
+        UUID uuid = player.getUniqueId();
+
         if (essentialsJail != null && essentialsJail.isAvailable()) {
             plugin.getSLF4JLogger().debug("Attempting to jail {} using Essentials...", player.getName());
 
-            // FIXED: Save return location BEFORE jailing (for both Essentials and built-in)
-            // putIfAbsent: keep the ORIGINAL pre-jail location. When a jail is re-applied
-            // (relog/restart restore) the player is already at/near the jail, so a plain put
-            // would clobber the real return location and release would drop them at the jail.
-            returnLocations.putIfAbsent(player.getUniqueId(), player.getLocation().clone());
+            // putIfAbsent keeps the ORIGINAL pre-jail location: when a jail is re-applied
+            // (relog or restart restore) the player already stands in the jail, and a plain
+            // put would overwrite the real return location with the jail itself.
+            Location previous = returnLocations.putIfAbsent(uuid, player.getLocation().clone());
+            boolean weStoredIt = previous == null;
 
-            boolean success = essentialsJail.jailPlayer(player, cellName);
-
-            if (success) {
-                // Track player as jailed (for our own management)
-                jailedPlayers.put(player.getUniqueId(), player.getLocation());
-
-                // Add to JailListener cache for performance
-                notifyJailListenerCacheAdd(player.getUniqueId());
-
+            if (essentialsJail.jailPlayer(player, cellName, duration)) {
+                jailedPlayers.add(uuid);
+                addToEnforcementCache(uuid);
                 player.sendMessage(plugin.messages().jailed());
                 plugin.getSLF4JLogger().info("Jailed {} using Essentials", player.getName());
                 return true;
-            } else {
-                // Essentials is hooked but jailing failed (and auto-create did not succeed).
-                // By design we do NOT fall back to the built-in jail while Essentials is present -
-                // when Essentials is hooked, jails must be created in Essentials.
-                returnLocations.remove(player.getUniqueId());
-                plugin.getSLF4JLogger().warn("Essentials is hooked but jailing {} failed - not using built-in jail. "
-                        + "Check the Essentials jail configuration or set BanHammer's jail location with /bh setjail.",
-                        player.getName());
-                return false;
             }
+
+            // Only drop the return location if this call is what created it - otherwise a
+            // failed re-jail would erase the location saved by the original jail.
+            if (weStoredIt) {
+                returnLocations.remove(uuid);
+            }
+            // When Essentials is hooked, jails are managed there by design; falling back to
+            // the built-in jail would put the player somewhere Essentials knows nothing about.
+            plugin.getSLF4JLogger().warn("Essentials is hooked but jailing {} failed - not using the built-in jail. "
+                    + "Check the Essentials jail configuration or set BanHammer's jail location with /setjail.",
+                    player.getName());
+            return false;
         }
 
-        // Built-in jail system (only used when Essentials is NOT hooked)
         if (jailLocation == null) {
             plugin.getSLF4JLogger().warn("Cannot jail player - jail location not set and Essentials not available");
             return false;
         }
 
-        plugin.getSLF4JLogger().debug("Jailing {} using built-in jail system", player.getName());
+        plugin.getSLF4JLogger().debug("Jailing {} using the built-in jail system", player.getName());
 
-        // Save return location
-        returnLocations.put(player.getUniqueId(), player.getLocation().clone());
+        returnLocations.putIfAbsent(uuid, player.getLocation().clone());
+        jailedPlayers.add(uuid);
+        addToEnforcementCache(uuid);
 
-        // Teleport to jail
         FoliaScheduler.teleportAsync(plugin, player, jailLocation);
-        jailedPlayers.put(player.getUniqueId(), jailLocation);
-
-        // Add to JailListener cache for performance
-        notifyJailListenerCacheAdd(player.getUniqueId());
-
         player.sendMessage(plugin.messages().jailed());
         return true;
     }
 
+    // ==================== Releasing ====================
+
     /**
      * Releases a player from jail.
-     * Handles both Essentials and built-in jail systems.
-     *
-     * @param player The player to release
      */
     public void releasePlayer(Player player) {
         UUID uuid = player.getUniqueId();
 
-        if (!jailedPlayers.containsKey(uuid)) {
+        if (!jailedPlayers.contains(uuid)) {
             return;
         }
 
-        // Remove from JailListener cache FIRST to prevent teleport cancellation
-        notifyJailListenerCacheRemove(uuid);
+        // Clear enforcement first so the teleport home is not cancelled by our own listener.
+        removeFromEnforcementCache(uuid);
 
-        // Get return location before removing from maps
         Location returnLoc = returnLocations.remove(uuid);
         jailedPlayers.remove(uuid);
         jailExpiry.remove(uuid);
 
-        // Try to release from Essentials if available and player is jailed there
         if (essentialsJail != null && essentialsJail.isAvailable() && essentialsJail.isJailed(player)) {
             plugin.getSLF4JLogger().debug("Releasing {} from Essentials jail...", player.getName());
-            boolean success = essentialsJail.releasePlayer(player);
-
-            if (success) {
-                // Teleport back to original location (Essentials doesn't do this)
-                if (returnLoc != null && returnLoc.getWorld() != null) {
-                    FoliaScheduler.teleportAsync(plugin, player, returnLoc);
-                }
-
+            if (essentialsJail.releasePlayer(player)) {
+                teleportHome(player, returnLoc);
                 player.sendMessage(plugin.messages().unjailed());
                 plugin.getSLF4JLogger().info("Released {} from Essentials jail", player.getName());
                 return;
-            } else {
-                plugin.getSLF4JLogger().warn("Failed to release {} from Essentials, trying built-in system", player.getName());
             }
+            plugin.getSLF4JLogger().warn("Failed to release {} from Essentials, falling back to the built-in system",
+                    player.getName());
         }
 
-        // Handle built-in jail release - teleport back to original location
-        if (returnLoc != null && returnLoc.getWorld() != null) {
-            FoliaScheduler.teleportAsync(plugin, player, returnLoc);
-        }
-
+        teleportHome(player, returnLoc);
         player.sendMessage(plugin.messages().unjailed());
     }
 
     /**
-     * Releases a player from jail by UUID (for offline players).
+     * Teleports a released player back where they came from.
+     */
+    private void teleportHome(Player player, Location returnLoc) {
+        if (!isUsable(returnLoc)) {
+            plugin.getSLF4JLogger().warn("No usable return location for {} - leaving them where they are. "
+                    + "The world they were jailed from may have been unloaded.", player.getName());
+            return;
+        }
+        FoliaScheduler.teleportAsync(plugin, player, returnLoc);
+    }
+
+    /**
+     * Checks whether a stored location can still be used.
      *
-     * @param uuid The player's UUID
+     * <p>{@link Location#getWorld()} holds a weak reference and <em>throws</em>
+     * {@code IllegalArgumentException("World unloaded")} rather than returning {@code null}
+     * once the world is gone, so a plain null check is not enough. Getting this wrong meant an
+     * unloaded jail world aborted the whole release, leaving the player stuck in jail with the
+     * tracking maps already cleared.
+     */
+    private static boolean isUsable(Location location) {
+        if (location == null) {
+            return false;
+        }
+        try {
+            return location.getWorld() != null;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Releases a player from jail by UUID (for offline players).
      */
     public void releasePlayerByUUID(UUID uuid) {
-        // Remove from jail tracking
         jailedPlayers.remove(uuid);
-        returnLocations.remove(uuid); // Fix memory leak - clean up return location
+        returnLocations.remove(uuid);
         jailExpiry.remove(uuid);
-
-        // Remove from JailListener cache
-        notifyJailListenerCacheRemove(uuid);
+        removeFromEnforcementCache(uuid);
     }
 
+    // ==================== Queries and enforcement ====================
+
     /**
-     * Checks if a player is currently jailed.
-     * Checks both Essentials and built-in jail systems.
-     *
-     * @param playerUuid The player's UUID
-     * @return true if jailed
+     * Checks whether a player is currently jailed.
      */
     public boolean isJailed(UUID playerUuid) {
-        // Check if player is online and in Essentials jail
-        Player player = Bukkit.getPlayer(playerUuid);
-        if (player != null && essentialsJail != null && essentialsJail.isAvailable()) {
-            if (essentialsJail.isJailed(player)) {
-                return true;
-            }
+        if (jailedPlayers.contains(playerUuid)) {
+            return true;
         }
 
-        // Check built-in jail system
-        return jailedPlayers.containsKey(playerUuid);
+        Player player = Bukkit.getPlayer(playerUuid);
+        return player != null && essentialsJail != null && essentialsJail.isAvailable()
+                && essentialsJail.isJailed(player);
     }
 
     /**
-     * Returns a player to jail if they leave the jail area.
-     * Only enforces for built-in jail system (Essentials handles its own enforcement).
+     * Returns a player to the jail area if they left it.
      *
-     * @param player The player to check
+     * <p>Only the built-in jail is enforced here; Essentials enforces its own.
      */
     public void enforceJail(Player player) {
-        if (!isJailed(player.getUniqueId())) {
+        if (!jailedPlayers.contains(player.getUniqueId())) {
             return;
         }
 
-        // Skip enforcement if player is in Essentials jail (Essentials handles its own enforcement)
+        // Resolved once - this runs on every movement packet, and the Essentials lookup goes
+        // through reflection.
         if (essentialsJail != null && essentialsJail.isAvailable() && essentialsJail.isJailed(player)) {
             return;
         }
 
-        // Only enforce for built-in jail system
-        if (jailLocation == null) {
+        Location jail = jailLocation;
+        if (!isUsable(jail)) {
             return;
         }
 
         Location playerLoc = player.getLocation();
-        double maxDistance = plugin.getConfig().getDouble("punishmentTypes.jail.maxDistance", 10.0);
+        double maxDistance = plugin.settings().jail().maxDistance();
 
-        if (playerLoc.getWorld() != jailLocation.getWorld() ||
-            playerLoc.distance(jailLocation) > maxDistance) {
-
-            // Teleport back to jail
-            FoliaScheduler.teleportAsync(plugin, player, jailLocation);
+        if (!playerLoc.getWorld().equals(jail.getWorld())
+                || playerLoc.distanceSquared(jail) > maxDistance * maxDistance) {
+            FoliaScheduler.teleportAsync(plugin, player, jail);
             player.sendMessage(plugin.messages().jailEscape());
         }
     }
 
     /**
-     * Sets the jail location.
-     *
-     * @param location The new jail location
+     * Sets the jail location and persists it.
      */
     public void setJailLocation(Location location) {
         this.jailLocation = location;
 
-        // Save to config
         ConfigurationSection jailConfig = plugin.getConfig().createSection("punishmentTypes.jail.location");
         jailConfig.set("world", location.getWorld().getName());
         jailConfig.set("x", location.getX());
@@ -311,198 +350,199 @@ public class JailManager {
         jailConfig.set("z", location.getZ());
         jailConfig.set("yaw", location.getYaw());
         jailConfig.set("pitch", location.getPitch());
-        plugin.saveConfig();
 
-        plugin.getSLF4JLogger().info("Jail location set to: " + location);
+        // Written off the main thread; saveConfig() serializes the whole file.
+        FoliaScheduler.runAsync(plugin, plugin::saveConfig);
+
+        plugin.getSLF4JLogger().info("Jail location set to: {}", location);
     }
 
     /**
-     * Gets the current jail location.
-     *
-     * @return The jail location, or null if not set
+     * @return the current jail location, or {@code null} if not set
      */
     public Location getJailLocation() {
         return jailLocation;
     }
 
     /**
-     * @return true if the Essentials jail hook is active (installed, enabled and available)
+     * @return true if the Essentials jail hook is active
      */
     public boolean isEssentialsAvailable() {
         return essentialsJail != null && essentialsJail.isAvailable();
     }
 
     /**
-     * @return the configured Essentials jail/cell names, or an empty collection if Essentials
-     *         is not hooked. Used by the /jail command to validate a requested cell.
+     * @return the configured Essentials jail/cell names, or an empty collection
      */
-    public java.util.Collection<String> getEssentialsJailNames() {
-        return essentialsJail != null ? essentialsJail.getJailNames() : java.util.Collections.emptyList();
+    public Collection<String> getEssentialsJailNames() {
+        return essentialsJail != null ? essentialsJail.getJailNames() : Collections.emptyList();
     }
 
+    // ==================== Restore ====================
+
     /**
-     * Loads jailed players from database on server start.
+     * Re-applies jails to players who are already online, once the database is ready.
      */
     public void loadJailedPlayers() {
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
-            return;
-        }
-
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            plugin.getPunishmentManager().getActivePunishments(player.getUniqueId()).thenAccept(punishments -> {
-                punishments.stream()
-                    .filter(p -> p.getType() == PunishmentType.JAIL)
-                    .findFirst()
-                    .ifPresent(p -> {
-                        // Check if player is still online before jailing to prevent concurrent modification
-                        FoliaScheduler.runOnEntity(plugin, player, () -> {
-                            if (player.isOnline()) {
-                                jailPlayer(player);
-                            }
-                        });
-                    });
-            });
-        }
-    }
-
-    /**
-     * Restores a player's jail status when they (re)join the server.
-     * Without this, a jailed player escapes enforcement simply by relogging
-     * (their enforcement cache entry is cleared on quit), and jails do not
-     * survive a server restart.
-     *
-     * @param player The joining player
-     */
-    public void restoreJailOnJoin(Player player) {
-        UUID uuid = player.getUniqueId();
-
-        // --- No database: in-memory tracking is the source of truth ---
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
-            if (!jailedPlayers.containsKey(uuid)) {
-                return; // not jailed
-            }
-            Long expiry = jailExpiry.get(uuid);
-            if (expiry != null && expiry <= System.currentTimeMillis()) {
-                releasePlayerByUUID(uuid); // temporary jail expired while the player was offline
-                return;
-            }
-            // Re-establish enforcement: the JailListener cache is cleared on quit, so it must
-            // be rebuilt (and the player pulled back into jail) or a relog escapes the jail.
-            FoliaScheduler.runOnEntity(plugin, player, () -> {
-                if (player.isOnline()) {
-                    jailPlayer(player);
-                }
-            });
-            return;
-        }
-
-        // --- Database enabled: the database is the source of truth ---
         Database database = plugin.getDatabase();
         if (database == null) {
             return;
         }
 
+        // One query for everybody. Asking per online player meant 150 queries on a busy
+        // server, which on SQLite (a single connection) ran the last ones into the connection
+        // timeout - and those players were then never re-jailed.
+        database.getActivePunishmentsByTypeGlobal(PunishmentType.JAIL)
+                .thenAccept(records -> {
+                    Instant now = Instant.now();
+                    for (PunishmentRecord record : records) {
+                        if (record.getExpiresAt() != null && !record.getExpiresAt().isAfter(now)) {
+                            continue; // Already expired; the unban scheduler will clean it up.
+                        }
+                        Player player = Bukkit.getPlayer(record.getVictimUuid());
+                        if (player == null || !player.isOnline()) {
+                            continue;
+                        }
+                        Duration remaining = record.getExpiresAt() == null
+                                ? null
+                                : Duration.between(now, record.getExpiresAt());
+                        FoliaScheduler.runOnEntity(plugin, player, () -> {
+                            if (player.isOnline()) {
+                                jailPlayer(player, remaining);
+                            }
+                        });
+                    }
+                })
+                .exceptionally(throwable -> {
+                    plugin.getSLF4JLogger().error("Failed to restore jailed players", throwable);
+                    return null;
+                });
+    }
+
+    /**
+     * Restores a player's jail status when they (re)join.
+     *
+     * <p>The player is added to the enforcement cache immediately and only removed again if
+     * the lookup says they are not jailed. Waiting for the database first left a window -
+     * hundreds of milliseconds on MySQL - in which movement and teleport handlers saw an
+     * empty cache and a jailed player could {@code /spawn} away.
+     */
+    public void restoreJailOnJoin(Player player) {
+        UUID uuid = player.getUniqueId();
+
+        Database database = plugin.getDatabase();
+        if (database == null) {
+            // No database: memory is the source of truth.
+            if (!jailedPlayers.contains(uuid)) {
+                return;
+            }
+            Long expiry = jailExpiry.get(uuid);
+            if (expiry != null && expiry <= System.currentTimeMillis()) {
+                releasePlayerByUUID(uuid);
+                return;
+            }
+            reapply(player, remainingFrom(jailExpiry.get(uuid)));
+            return;
+        }
+
+        // Block first, ask afterwards.
+        addToEnforcementCache(uuid);
+
         database.getActivePunishmentsByType(uuid, PunishmentType.JAIL).thenAccept(punishments -> {
+            Instant now = Instant.now();
             PunishmentRecord active = punishments.stream()
-                    .filter(p -> p.getExpiresAt() == null || p.getExpiresAt().isAfter(Instant.now()))
+                    .filter(p -> p.getExpiresAt() == null || p.getExpiresAt().isAfter(now))
                     .findFirst()
                     .orElse(null);
 
-            // Not jailed, or jail already expired (the UnbanScheduler will clean it up)
             if (active == null) {
+                if (!jailedPlayers.contains(uuid)) {
+                    removeFromEnforcementCache(uuid);
+                }
                 return;
             }
 
-            // Re-apply the jail on the player's region/main thread. We re-run this even if
-            // jailedPlayers still holds the entry (fast relog within the cleanup window),
-            // because the enforcement cache was cleared on quit and must be rebuilt.
-            FoliaScheduler.runOnEntity(plugin, player, () -> {
-                if (player.isOnline()) {
-                    jailPlayer(player);
-                }
-            });
+            Duration remaining = active.getExpiresAt() == null ? null : Duration.between(now, active.getExpiresAt());
+            reapply(player, remaining);
         }).exceptionally(throwable -> {
             plugin.getSLF4JLogger().error("Failed to restore jail status for {}", player.getName(), throwable);
+            // Do not leave a player blocked because of a database hiccup.
+            if (!jailedPlayers.contains(uuid)) {
+                removeFromEnforcementCache(uuid);
+            }
             return null;
         });
     }
 
-    /**
-     * Notifies JailListener to add player to cache for performance optimization.
-     */
-    private void notifyJailListenerCacheAdd(UUID playerUuid) {
-        try {
-            // Get JailListener from the plugin's HandlerList
-            for (var listener : org.bukkit.event.HandlerList.getRegisteredListeners(plugin)) {
-                if (listener.getListener() instanceof dev.banhammer.plugin.listener.JailListener jailListener) {
-                    jailListener.addToCache(playerUuid);
-                    break;
-                }
+    private Duration remainingFrom(Long expiryMillis) {
+        if (expiryMillis == null) {
+            return null;
+        }
+        long remaining = expiryMillis - System.currentTimeMillis();
+        return remaining > 0 ? Duration.ofMillis(remaining) : Duration.ofSeconds(1);
+    }
+
+    private void reapply(Player player, Duration remaining) {
+        FoliaScheduler.runOnEntity(plugin, player, () -> {
+            if (player.isOnline()) {
+                jailPlayer(player, remaining);
             }
-        } catch (Exception e) {
-            plugin.getSLF4JLogger().debug("Could not update JailListener cache: {}", e.getMessage());
+        });
+    }
+
+    // ==================== Enforcement cache ====================
+
+    private void addToEnforcementCache(UUID playerUuid) {
+        JailListener listener = jailListener;
+        if (listener != null) {
+            listener.addToCache(playerUuid);
         }
     }
 
-    /**
-     * Notifies JailListener to remove player from cache.
-     */
-    private void notifyJailListenerCacheRemove(UUID playerUuid) {
-        try {
-            // Get JailListener from the plugin's HandlerList
-            for (var listener : org.bukkit.event.HandlerList.getRegisteredListeners(plugin)) {
-                if (listener.getListener() instanceof dev.banhammer.plugin.listener.JailListener jailListener) {
-                    jailListener.removeFromCache(playerUuid);
-                    break;
-                }
-            }
-        } catch (Exception e) {
-            plugin.getSLF4JLogger().debug("Could not update JailListener cache: {}", e.getMessage());
+    private void removeFromEnforcementCache(UUID playerUuid) {
+        JailListener listener = jailListener;
+        if (listener != null) {
+            listener.removeFromCache(playerUuid);
         }
     }
 
-    /**
-     * Starts a periodic cleanup task to remove offline players from jail tracking.
-     * Prevents memory leaks from players who logged out while jailed.
-     */
+    // ==================== Background tasks ====================
+
     private void startCleanupTask() {
-        // Run cleanup every 5 minutes (6000 ticks)
         cleanupTask = FoliaScheduler.runAsyncRepeating(plugin, () -> {
             int removed = cleanupOfflineJails();
             if (removed > 0) {
-                plugin.getSLF4JLogger().debug("Cleaned up {} offline jailed players from memory", removed);
+                plugin.getSLF4JLogger().debug("Cleaned up {} offline jailed player(s) from memory", removed);
             }
         }, 6000L, 6000L);
     }
 
     /**
-     * Cleans up offline players from jail tracking maps.
-     * With a database, offline players are freed from memory (the jail persists in the DB and
-     * is restored on rejoin). Without a database, memory IS the source of truth, so only expired
-     * temporary jails are purged here and active/permanent jails are kept so they survive a relog.
+     * Frees memory held for offline jailed players.
      *
-     * @return Number of entries removed
+     * <p>With a database the jail persists there and is restored on rejoin, so entries can be
+     * dropped. Without one, memory <em>is</em> the record, so only expired temporary jails go.
+     *
+     * @return number of entries removed
      */
     public int cleanupOfflineJails() {
         int removed = 0;
-        boolean dbEnabled = plugin.getPunishmentManager().isDatabaseEnabled();
+        boolean hasDatabase = plugin.getDatabase() != null;
         long now = System.currentTimeMillis();
 
-        for (UUID uuid : jailedPlayers.keySet()) {
+        for (UUID uuid : List.copyOf(jailedPlayers)) {
             Player player = Bukkit.getPlayer(uuid);
             if (player != null && player.isOnline()) {
                 continue;
             }
 
-            if (dbEnabled) {
-                // Jail persists in the DB and is re-applied from there on rejoin.
+            if (hasDatabase) {
                 jailedPlayers.remove(uuid);
                 returnLocations.remove(uuid);
                 jailExpiry.remove(uuid);
+                removeFromEnforcementCache(uuid);
                 removed++;
             } else {
-                // No DB: dropping an active jail would let the player escape by relogging,
-                // so only purge temporary jails that have already expired.
                 Long expiry = jailExpiry.get(uuid);
                 if (expiry != null && expiry <= now) {
                     releasePlayerByUUID(uuid);
@@ -514,22 +554,12 @@ public class JailManager {
         return removed;
     }
 
-    /**
-     * Starts a fine-grained task that auto-releases expired temporary jails.
-     * Acts as a fallback when no database is configured; with a database the
-     * UnbanScheduler is the authority, so this task stays passive then.
-     */
     private void startExpiryTask() {
-        // Check once per second (20 ticks)
         expiryTask = FoliaScheduler.runAsyncRepeating(plugin, this::checkInMemoryExpiry, 20L, 20L);
     }
 
     private void checkInMemoryExpiry() {
         if (jailExpiry.isEmpty()) {
-            return;
-        }
-        // With a database, the UnbanScheduler handles expiry (and DB deactivation).
-        if (plugin.getPunishmentManager().isDatabaseEnabled()) {
             return;
         }
 
@@ -539,12 +569,15 @@ public class JailManager {
                 continue;
             }
             UUID uuid = entry.getKey();
-            jailExpiry.remove(uuid); // remove first to avoid double-firing on the next tick
+            // Removed first so a slow release cannot fire twice on the next tick.
+            jailExpiry.remove(uuid);
 
             Player player = Bukkit.getPlayer(uuid);
             if (player != null && player.isOnline()) {
-                plugin.getSLF4JLogger().info("Automatically released {} from jail (temporary jail expired)", player.getName());
-                FoliaScheduler.runOnEntity(plugin, player, () -> releasePlayer(player));
+                plugin.getSLF4JLogger().info("Automatically released {} from jail (temporary jail expired)",
+                        player.getName());
+                FoliaScheduler.runOnEntity(plugin, player, () -> releasePlayer(player),
+                        () -> releasePlayerByUUID(uuid));
             } else {
                 releasePlayerByUUID(uuid);
             }
@@ -552,10 +585,17 @@ public class JailManager {
     }
 
     /**
-     * Stops the cleanup and expiry tasks (called on plugin disable).
+     * Stops the background tasks and clears all state (called on plugin disable).
      */
     public void shutdown() {
         FoliaScheduler.cancelTask(cleanupTask);
         FoliaScheduler.cancelTask(expiryTask);
+        cleanupTask = null;
+        expiryTask = null;
+
+        jailedPlayers.clear();
+        returnLocations.clear();
+        jailExpiry.clear();
+        jailListener = null;
     }
 }

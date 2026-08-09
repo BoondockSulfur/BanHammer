@@ -15,6 +15,7 @@ public class PunishmentStatistics {
     private int kicks;
     private int mutes;
     private int warnings;
+    private int jails;
 
     public PunishmentStatistics() {
     }
@@ -80,6 +81,18 @@ public class PunishmentStatistics {
         this.warnings = warnings;
     }
 
+    /**
+     * @return number of jail punishments issued; counted separately so the per-type figures
+     *         add up to {@link #getTotalPunishments()}
+     */
+    public int getJails() {
+        return jails;
+    }
+
+    public void setJails(int jails) {
+        this.jails = jails;
+    }
+
     @Override
     public String toString() {
         return "PunishmentStatistics{" +
@@ -88,6 +101,7 @@ public class PunishmentStatistics {
                 ", bans=" + bans +
                 ", kicks=" + kicks +
                 ", mutes=" + mutes +
+                ", jails=" + jails +
                 ", warnings=" + warnings +
                 '}';
     }

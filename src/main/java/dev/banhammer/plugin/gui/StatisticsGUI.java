@@ -1,306 +1,392 @@
 package dev.banhammer.plugin.gui;
 
 import dev.banhammer.plugin.BanHammerPlugin;
+import dev.banhammer.plugin.database.Database;
 import dev.banhammer.plugin.database.model.PunishmentRecord;
 import dev.banhammer.plugin.database.model.PunishmentStatistics;
 import dev.banhammer.plugin.database.model.PunishmentType;
+import dev.banhammer.plugin.gui.BanHammerMenuHolder.Action;
+import dev.banhammer.plugin.gui.BanHammerMenuHolder.MenuType;
+import dev.banhammer.plugin.util.FoliaScheduler;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.SkullMeta;
+import org.bukkit.persistence.PersistentDataType;
 
-import java.text.SimpleDateFormat;
-import java.util.*;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
 
 /**
  * Inventory-based GUI for viewing statistics and leaderboards.
+ *
+ * <p>Every entry point re-checks {@code banhammer.stats}; buttons are tagged with a
+ * {@link Action} in their persistent data rather than being recognised by their display name,
+ * so the labels can be translated freely.
  *
  * @since 3.0.0
  */
 public class StatisticsGUI {
 
+    /** Permission required to view any statistics screen. */
+    public static final String PERMISSION = "banhammer.stats";
+
+    /** Entries per page in the punishment history view. */
+    private static final int HISTORY_PER_PAGE = 36;
+
+    private static final DateTimeFormatter DATE_FORMAT =
+            DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm").withZone(ZoneId.systemDefault());
+
     private final BanHammerPlugin plugin;
-    private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("dd.MM.yyyy HH:mm");
+    private final NamespacedKey actionKey;
 
     public StatisticsGUI(BanHammerPlugin plugin) {
         this.plugin = plugin;
+        this.actionKey = new NamespacedKey(plugin, "menu_action");
+    }
+
+    /**
+     * @return the button action stored on an item, or {@code null} if it is not a button
+     */
+    public Action actionOf(ItemStack item) {
+        if (item == null || !item.hasItemMeta()) {
+            return null;
+        }
+        String raw = item.getItemMeta().getPersistentDataContainer().get(actionKey, PersistentDataType.STRING);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return Action.valueOf(raw);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     /**
      * Opens the main statistics menu.
      */
     public void openMainMenu(Player player) {
-        // Check if database is enabled
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
-            player.sendMessage(plugin.messages().databaseDisabled());
+        if (!canOpen(player)) {
             return;
         }
 
-        Inventory inv = Bukkit.createInventory(null, 27, Component.text("BanHammer Statistiken").color(NamedTextColor.GOLD));
+        Inventory inv = createInventory(MenuType.MAIN, 1, 27,
+                plugin.messages().gui("title.main", "BanHammer Statistics"));
 
-        // Player Statistics
-        ItemStack playerStats = createItem(Material.PLAYER_HEAD,
-            Component.text("Deine Statistiken").color(NamedTextColor.GREEN),
-            List.of(
-                Component.text("Klicke um deine").color(NamedTextColor.GRAY),
-                Component.text("Bestrafungs-Historie").color(NamedTextColor.GRAY),
-                Component.text("anzuzeigen").color(NamedTextColor.GRAY)
-            ));
-        inv.setItem(11, playerStats);
+        inv.setItem(11, button(Material.PLAYER_HEAD, Action.OPEN_PLAYER_STATS,
+                plugin.messages().gui("button.playerStats", "<green>Your statistics</green>"),
+                List.of(plugin.messages().gui("button.playerStatsLore",
+                        "<gray>Show your punishment history</gray>"))));
 
-        // Staff Leaderboard
-        ItemStack staffLeaderboard = createItem(Material.DIAMOND_SWORD,
-            Component.text("Staff Leaderboard").color(NamedTextColor.YELLOW),
-            List.of(
-                Component.text("Zeigt die aktivsten").color(NamedTextColor.GRAY),
-                Component.text("Staff-Members").color(NamedTextColor.GRAY)
-            ));
-        inv.setItem(13, staffLeaderboard);
+        inv.setItem(13, button(Material.DIAMOND_SWORD, Action.OPEN_STAFF_LEADERBOARD,
+                plugin.messages().gui("button.leaderboard", "<yellow>Staff leaderboard</yellow>"),
+                List.of(plugin.messages().gui("button.leaderboardLore",
+                        "<gray>The most active staff members</gray>"))));
 
-        // Server Statistics
-        ItemStack serverStats = createItem(Material.BOOK,
-            Component.text("Server Statistiken").color(NamedTextColor.AQUA),
-            List.of(
-                Component.text("Gesamtübersicht").color(NamedTextColor.GRAY),
-                Component.text("aller Bestrafungen").color(NamedTextColor.GRAY)
-            ));
-        inv.setItem(15, serverStats);
+        inv.setItem(15, button(Material.BOOK, Action.OPEN_SERVER_STATS,
+                plugin.messages().gui("button.serverStats", "<aqua>Server statistics</aqua>"),
+                List.of(plugin.messages().gui("button.serverStatsLore",
+                        "<gray>Totals across all punishments</gray>"))));
 
-        // Close button
-        ItemStack close = createItem(Material.BARRIER,
-            Component.text("Schließen").color(NamedTextColor.RED),
-            List.of());
-        inv.setItem(26, close);
+        inv.setItem(26, closeButton());
 
         player.openInventory(inv);
     }
 
     /**
-     * Opens player statistics GUI.
+     * Opens the punishment history of a player.
+     *
+     * @param page the 1-based page to show
      */
-    public void openPlayerStats(Player player, UUID targetUuid) {
-        // Check if database is enabled
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
-            player.sendMessage(plugin.messages().databaseDisabled());
+    public void openPlayerStats(Player viewer, UUID targetUuid, int page) {
+        if (!canOpen(viewer)) {
             return;
         }
 
-        plugin.getPunishmentManager().getHistory(targetUuid, 100).thenAccept(history -> {
-            dev.banhammer.plugin.util.FoliaScheduler.runOnEntity(plugin, player, () -> {
-                Inventory inv = Bukkit.createInventory(null, 54, Component.text("Spieler Statistiken").color(NamedTextColor.GOLD));
+        Database database = plugin.getDatabase();
+        if (database == null) {
+            viewer.sendMessage(plugin.messages().databaseDisabled());
+            return;
+        }
 
-                // Summary at top
-                int total = history.size();
-                int bans = (int) history.stream().filter(r -> r.getType() == PunishmentType.BAN || r.getType() == PunishmentType.TEMP_BAN).count();
-                int kicks = (int) history.stream().filter(r -> r.getType() == PunishmentType.KICK).count();
-                int mutes = (int) history.stream().filter(r -> r.getType() == PunishmentType.MUTE || r.getType() == PunishmentType.TEMP_MUTE).count();
-                int warnings = (int) history.stream().filter(r -> r.getType() == PunishmentType.WARNING).count();
-                int jails = (int) history.stream().filter(r -> r.getType() == PunishmentType.JAIL).count();
+        int requestedPage = Math.max(1, page);
 
-                inv.setItem(4, createItem(Material.PLAYER_HEAD,
-                    Component.text("Gesamt: " + total).color(NamedTextColor.GOLD).decorate(TextDecoration.BOLD),
-                    List.of(
-                        Component.text("Bans: " + bans).color(NamedTextColor.RED),
-                        Component.text("Kicks: " + kicks).color(NamedTextColor.YELLOW),
-                        Component.text("Mutes: " + mutes).color(NamedTextColor.GOLD),
-                        Component.text("Warnings: " + warnings).color(NamedTextColor.LIGHT_PURPLE),
-                        Component.text("Jails: " + jails).color(NamedTextColor.DARK_GRAY)
-                    )));
+        database.countPunishmentsByPlayer(targetUuid)
+                .thenCompose(total -> {
+                    int maxPages = Math.max(1, (int) Math.ceil(total / (double) HISTORY_PER_PAGE));
+                    int effectivePage = Math.min(requestedPage, maxPages);
 
-                // Recent punishments (last 36)
-                int slot = 9;
-                for (int i = 0; i < Math.min(36, history.size()); i++) {
-                    PunishmentRecord record = history.get(i);
-                    Material material = getMaterialForType(record.getType());
+                    // Only the rows up to the requested page are fetched, then the page is
+                    // sliced out - no need to pull the whole history to show one screen.
+                    return database.getPunishmentsByPlayer(targetUuid, effectivePage * HISTORY_PER_PAGE)
+                            .thenAccept(history -> FoliaScheduler.runOnEntity(plugin, viewer,
+                                    () -> renderHistory(viewer, history, total, effectivePage, maxPages)));
+                })
+                .exceptionally(throwable -> fail(viewer, "player statistics", throwable));
+    }
 
-                    List<Component> lore = new ArrayList<>();
-                    lore.add(Component.text("ID: " + record.getId()).color(NamedTextColor.GRAY));
-                    lore.add(Component.text("Von: " + record.getStaffName()).color(NamedTextColor.GRAY));
-                    lore.add(Component.text("Grund: " + record.getReason()).color(NamedTextColor.WHITE));
-                    lore.add(Component.text("Datum: " + DATE_FORMAT.format(Date.from(record.getIssuedAt()))).color(NamedTextColor.GRAY));
+    private void renderHistory(Player viewer, List<PunishmentRecord> history, int total, int page, int maxPages) {
+        if (!viewer.isOnline()) {
+            return;
+        }
 
-                    if (record.isActive()) {
-                        lore.add(Component.text("✓ AKTIV").color(NamedTextColor.GREEN).decorate(TextDecoration.BOLD));
-                    }
+        Inventory inv = createInventory(MenuType.PLAYER_STATS, page, 54,
+                plugin.messages().gui("title.playerStats", "Player statistics"));
 
-                    inv.setItem(slot++, createItem(material,
-                        Component.text(record.getType().name()).color(getColorForType(record.getType())),
-                        lore));
-                }
+        inv.setItem(4, plain(Material.PLAYER_HEAD,
+                plugin.messages().gui("header.total", "<gold><b>Total: {count}</b></gold>",
+                        "{count}", String.valueOf(total)),
+                List.of(
+                        countLine("bans", "Bans", history, PunishmentType.BAN,
+                                PunishmentType.TEMP_BAN, PunishmentType.IP_BAN),
+                        countLine("kicks", "Kicks", history, PunishmentType.KICK),
+                        countLine("mutes", "Mutes", history, PunishmentType.MUTE, PunishmentType.TEMP_MUTE),
+                        countLine("jails", "Jails", history, PunishmentType.JAIL),
+                        countLine("warnings", "Warnings", history, PunishmentType.WARNING))));
 
-                // Back button
-                inv.setItem(45, createItem(Material.ARROW,
-                    Component.text("Zurück").color(NamedTextColor.YELLOW),
-                    List.of()));
+        int startIndex = (page - 1) * HISTORY_PER_PAGE;
+        int slot = 9;
+        for (int i = startIndex; i < history.size() && slot < 45; i++) {
+            PunishmentRecord record = history.get(i);
 
-                player.openInventory(inv);
-            });
-        });
+            List<Component> lore = new ArrayList<>();
+            lore.add(plugin.messages().gui("entry.id", "<gray>ID: {id}</gray>",
+                    "{id}", String.valueOf(record.getId())));
+            lore.add(plugin.messages().gui("entry.staff", "<gray>By: {staff}</gray>",
+                    "{staff}", record.getStaffName()));
+            lore.add(plugin.messages().gui("entry.reason", "<white>Reason: {reason}</white>",
+                    "{reason}", record.getReason() == null ? "-" : record.getReason()));
+            lore.add(plugin.messages().gui("entry.date", "<gray>Date: {date}</gray>",
+                    "{date}", DATE_FORMAT.format(record.getIssuedAt())));
+            if (record.isActive()) {
+                lore.add(plugin.messages().gui("entry.active", "<green><b>ACTIVE</b></green>"));
+            }
+
+            inv.setItem(slot++, plain(getMaterialForType(record.getType()),
+                    Component.text(record.getType().name()).color(getColorForType(record.getType())),
+                    lore));
+        }
+
+        if (page > 1) {
+            inv.setItem(48, button(Material.ARROW, Action.PAGE_PREVIOUS,
+                    plugin.messages().gui("button.previousPage", "<yellow>Previous page</yellow>"), List.of()));
+        }
+        if (page < maxPages) {
+            inv.setItem(50, button(Material.ARROW, Action.PAGE_NEXT,
+                    plugin.messages().gui("button.nextPage", "<yellow>Next page</yellow>"), List.of()));
+        }
+        inv.setItem(49, plain(Material.PAPER,
+                plugin.messages().gui("footer.page", "<gray>Page {page}</gray>",
+                        "{page}", page + "/" + maxPages),
+                List.of()));
+        inv.setItem(45, backButton());
+
+        viewer.openInventory(inv);
     }
 
     /**
-     * Opens staff leaderboard GUI.
+     * Opens the staff leaderboard.
      */
     public void openStaffLeaderboard(Player player) {
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
+        if (!canOpen(player)) {
+            return;
+        }
+
+        Database database = plugin.getDatabase();
+        if (database == null) {
             player.sendMessage(plugin.messages().databaseDisabled());
             return;
         }
 
-        plugin.getDatabase().getStaffStatistics(45).thenAccept(stats -> {
-            dev.banhammer.plugin.util.FoliaScheduler.runOnEntity(plugin, player, () -> {
-                Inventory inv = Bukkit.createInventory(null, 54, Component.text("Staff Leaderboard").color(NamedTextColor.GOLD));
-
-                int slot = 0;
-                int rank = 1;
-
-                for (PunishmentStatistics stat : stats) {
-                    if (slot >= 45) break;
-
-                    Material material = switch (rank) {
-                        case 1 -> Material.GOLD_BLOCK;
-                        case 2 -> Material.IRON_BLOCK;
-                        case 3 -> Material.COPPER_BLOCK;
-                        default -> Material.PLAYER_HEAD;
-                    };
-
-                    List<Component> lore = new ArrayList<>();
-                    lore.add(Component.text("Rang: #" + rank).color(NamedTextColor.YELLOW));
-                    lore.add(Component.text(""));
-                    lore.add(Component.text("Gesamt: " + stat.getTotalPunishments()).color(NamedTextColor.GOLD));
-                    lore.add(Component.text("Bans: " + stat.getBans()).color(NamedTextColor.RED));
-                    lore.add(Component.text("Kicks: " + stat.getKicks()).color(NamedTextColor.YELLOW));
-                    lore.add(Component.text("Mutes: " + stat.getMutes()).color(NamedTextColor.GOLD));
-                    lore.add(Component.text("Warnings: " + stat.getWarnings()).color(NamedTextColor.LIGHT_PURPLE));
-
-                    ItemStack item = createItem(material,
-                        Component.text(stat.getStaffName()).color(NamedTextColor.GREEN).decorate(TextDecoration.BOLD),
-                        lore);
-
-                    // Set player head
-                    if (material == Material.PLAYER_HEAD && item.getItemMeta() instanceof SkullMeta skullMeta) {
-                        OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(stat.getStaffUuid());
-                        skullMeta.setOwningPlayer(offlinePlayer);
-                        item.setItemMeta(skullMeta);
+        database.getStaffStatistics(45)
+                .thenAccept(stats -> FoliaScheduler.runOnEntity(plugin, player, () -> {
+                    if (!player.isOnline()) {
+                        return;
                     }
 
-                    inv.setItem(slot++, item);
-                    rank++;
-                }
+                    Inventory inv = createInventory(MenuType.STAFF_LEADERBOARD, 1, 54,
+                            plugin.messages().gui("title.leaderboard", "Staff leaderboard"));
 
-                // Back button
-                inv.setItem(49, createItem(Material.ARROW,
-                    Component.text("Zurück").color(NamedTextColor.YELLOW),
-                    List.of()));
+                    int slot = 0;
+                    int rank = 1;
+                    for (PunishmentStatistics stat : stats) {
+                        if (slot >= 45) {
+                            break;
+                        }
 
-                player.openInventory(inv);
-            });
-        });
+                        Material material = switch (rank) {
+                            case 1 -> Material.GOLD_BLOCK;
+                            case 2 -> Material.IRON_BLOCK;
+                            case 3 -> Material.COPPER_BLOCK;
+                            default -> Material.PLAYER_HEAD;
+                        };
+
+                        List<Component> lore = new ArrayList<>();
+                        lore.add(plugin.messages().gui("entry.rank", "<yellow>Rank: #{rank}</yellow>",
+                                "{rank}", String.valueOf(rank)));
+                        lore.add(Component.empty());
+                        lore.add(statLine("total", "Total", stat.getTotalPunishments()));
+                        lore.add(statLine("bans", "Bans", stat.getBans()));
+                        lore.add(statLine("kicks", "Kicks", stat.getKicks()));
+                        lore.add(statLine("mutes", "Mutes", stat.getMutes()));
+                        lore.add(statLine("jails", "Jails", stat.getJails()));
+                        lore.add(statLine("warnings", "Warnings", stat.getWarnings()));
+
+                        ItemStack item = plain(material,
+                                Component.text(stat.getStaffName() == null ? "Unknown" : stat.getStaffName())
+                                        .color(NamedTextColor.GREEN).decorate(TextDecoration.BOLD),
+                                lore);
+
+                        if (material == Material.PLAYER_HEAD && stat.getStaffUuid() != null
+                                && item.getItemMeta() instanceof SkullMeta skullMeta) {
+                            OfflinePlayer offlinePlayer = Bukkit.getOfflinePlayer(stat.getStaffUuid());
+                            skullMeta.setOwningPlayer(offlinePlayer);
+                            item.setItemMeta(skullMeta);
+                        }
+
+                        inv.setItem(slot++, item);
+                        rank++;
+                    }
+
+                    inv.setItem(49, backButton());
+                    player.openInventory(inv);
+                }))
+                .exceptionally(throwable -> fail(player, "staff leaderboard", throwable));
     }
 
     /**
-     * Opens server statistics GUI.
+     * Opens the server-wide statistics.
      */
     public void openServerStats(Player player) {
-        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
+        if (!canOpen(player)) {
+            return;
+        }
+
+        Database database = plugin.getDatabase();
+        if (database == null) {
             player.sendMessage(plugin.messages().databaseDisabled());
             return;
         }
 
-        // Aggregate all staff statistics for server-wide stats
-        plugin.getDatabase().getStaffStatistics(1000).thenAccept(staffStats -> {
-            dev.banhammer.plugin.util.FoliaScheduler.runOnEntity(plugin, player, () -> {
-                // Calculate totals
-                int totalBans = 0;
-                int totalKicks = 0;
-                int totalMutes = 0;
-                int totalWarnings = 0;
-                int totalPunishments = 0;
-                int totalStaff = staffStats.size();
+        // Aggregated in SQL rather than by summing per-staff rows in Java.
+        database.getServerStatistics()
+                .thenAccept(stats -> FoliaScheduler.runOnEntity(plugin, player, () -> {
+                    if (!player.isOnline()) {
+                        return;
+                    }
 
-                for (PunishmentStatistics stat : staffStats) {
-                    totalBans += stat.getBans();
-                    totalKicks += stat.getKicks();
-                    totalMutes += stat.getMutes();
-                    totalWarnings += stat.getWarnings();
-                    totalPunishments += stat.getTotalPunishments();
-                }
+                    Inventory inv = createInventory(MenuType.SERVER_STATS, 1, 27,
+                            plugin.messages().gui("title.serverStats", "Server statistics"));
 
-                Inventory inv = Bukkit.createInventory(null, 27, Component.text("Server Statistiken").color(NamedTextColor.GOLD));
+                    inv.setItem(10, statTile(Material.BOOK, "total", "Total punishments",
+                            stats.getTotalPunishments()));
+                    inv.setItem(11, statTile(Material.IRON_BARS, "bans", "Bans", stats.getBans()));
+                    inv.setItem(12, statTile(Material.IRON_DOOR, "kicks", "Kicks", stats.getKicks()));
+                    inv.setItem(13, statTile(Material.PINK_CANDLE, "mutes", "Mutes", stats.getMutes()));
+                    inv.setItem(14, statTile(Material.YELLOW_BANNER, "warnings", "Warnings", stats.getWarnings()));
+                    inv.setItem(15, statTile(Material.IRON_BARS, "jails", "Jails", stats.getJails()));
 
-                // Total punishments
-                inv.setItem(10, createItem(Material.BOOK,
-                    Component.text("Gesamt-Bestrafungen").color(NamedTextColor.GOLD).decorate(TextDecoration.BOLD),
-                    List.of(
-                        Component.text("Alle Bestrafungen: " + totalPunishments).color(NamedTextColor.WHITE)
-                    )));
-
-                // Bans
-                inv.setItem(11, createItem(Material.IRON_BARS,
-                    Component.text("Bans").color(NamedTextColor.RED).decorate(TextDecoration.BOLD),
-                    List.of(
-                        Component.text("Anzahl: " + totalBans).color(NamedTextColor.WHITE)
-                    )));
-
-                // Kicks
-                inv.setItem(12, createItem(Material.IRON_DOOR,
-                    Component.text("Kicks").color(NamedTextColor.YELLOW).decorate(TextDecoration.BOLD),
-                    List.of(
-                        Component.text("Anzahl: " + totalKicks).color(NamedTextColor.WHITE)
-                    )));
-
-                // Mutes
-                inv.setItem(13, createItem(Material.PINK_CANDLE,
-                    Component.text("Mutes").color(NamedTextColor.GOLD).decorate(TextDecoration.BOLD),
-                    List.of(
-                        Component.text("Anzahl: " + totalMutes).color(NamedTextColor.WHITE)
-                    )));
-
-                // Warnings
-                inv.setItem(14, createItem(Material.YELLOW_BANNER,
-                    Component.text("Warnungen").color(NamedTextColor.LIGHT_PURPLE).decorate(TextDecoration.BOLD),
-                    List.of(
-                        Component.text("Anzahl: " + totalWarnings).color(NamedTextColor.WHITE)
-                    )));
-
-                // Staff count
-                inv.setItem(16, createItem(Material.DIAMOND_SWORD,
-                    Component.text("Aktive Staff-Members").color(NamedTextColor.AQUA).decorate(TextDecoration.BOLD),
-                    List.of(
-                        Component.text("Anzahl: " + totalStaff).color(NamedTextColor.WHITE)
-                    )));
-
-                // Back button
-                inv.setItem(22, createItem(Material.ARROW,
-                    Component.text("Zurück").color(NamedTextColor.YELLOW),
-                    List.of()));
-
-                player.openInventory(inv);
-            });
-        }).exceptionally(ex -> {
-            plugin.getSLF4JLogger().error("Failed to load server statistics", ex);
-            player.sendMessage(plugin.messages().errorOccurred());
-            player.closeInventory(); // Close any partially loaded GUI
-            return null;
-        });
+                    inv.setItem(22, backButton());
+                    player.openInventory(inv);
+                }))
+                .exceptionally(throwable -> fail(player, "server statistics", throwable));
     }
 
-    // Helper methods
+    // ==================== Helpers ====================
 
-    private ItemStack createItem(Material material, Component name, List<Component> lore) {
+    private boolean canOpen(Player player) {
+        if (!player.hasPermission(PERMISSION)) {
+            player.sendMessage(plugin.messages().noPermission());
+            return false;
+        }
+        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
+            player.sendMessage(plugin.messages().databaseDisabled());
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Reports a failed load instead of leaving the player staring at a menu that never opens.
+     */
+    private Void fail(Player player, String what, Throwable throwable) {
+        plugin.getSLF4JLogger().error("Failed to load {}", what, throwable);
+        FoliaScheduler.runOnEntity(plugin, player, () -> {
+            if (player.isOnline()) {
+                player.sendMessage(plugin.messages().errorOccurred());
+            }
+        });
+        return null;
+    }
+
+    private Inventory createInventory(MenuType type, int page, int size, Component title) {
+        BanHammerMenuHolder holder = new BanHammerMenuHolder(type, page);
+        Inventory inventory = Bukkit.createInventory(holder, size, title);
+        holder.setInventory(inventory);
+        return inventory;
+    }
+
+    private Component countLine(String key, String label, List<PunishmentRecord> history,
+                                PunishmentType... types) {
+        long count = history.stream().filter(r -> {
+            for (PunishmentType type : types) {
+                if (r.getType() == type) {
+                    return true;
+                }
+            }
+            return false;
+        }).count();
+        return statLine(key, label, (int) count);
+    }
+
+    private Component statLine(String key, String label, int value) {
+        return plugin.messages().gui("stat." + key, "<gray>" + label + ": {count}</gray>",
+                "{count}", String.valueOf(value));
+    }
+
+    private ItemStack statTile(Material material, String key, String label, int value) {
+        return plain(material,
+                plugin.messages().gui("tile." + key, "<b>" + label + "</b>"),
+                List.of(statLine(key, label, value)));
+    }
+
+    private ItemStack backButton() {
+        return button(Material.ARROW, Action.BACK,
+                plugin.messages().gui("button.back", "<yellow>Back</yellow>"), List.of());
+    }
+
+    private ItemStack closeButton() {
+        return button(Material.BARRIER, Action.CLOSE,
+                plugin.messages().gui("button.close", "<red>Close</red>"), List.of());
+    }
+
+    /** Builds a clickable button, tagging it with its action. */
+    private ItemStack button(Material material, Action action, Component name, List<Component> lore) {
+        ItemStack item = plain(material, name, lore);
+        ItemMeta meta = item.getItemMeta();
+        meta.getPersistentDataContainer().set(actionKey, PersistentDataType.STRING, action.name());
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    /** Builds a decorative, non-clickable item. */
+    private ItemStack plain(Material material, Component name, List<Component> lore) {
         ItemStack item = new ItemStack(material);
         ItemMeta meta = item.getItemMeta();
         meta.displayName(name.decoration(TextDecoration.ITALIC, false));
-        meta.lore(lore.stream()
-            .map(c -> c.decoration(TextDecoration.ITALIC, false))
-            .toList());
+        meta.lore(lore.stream().map(c -> c.decoration(TextDecoration.ITALIC, false)).toList());
         item.setItemMeta(meta);
         return item;
     }

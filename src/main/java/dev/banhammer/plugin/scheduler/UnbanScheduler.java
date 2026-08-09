@@ -5,54 +5,92 @@ import dev.banhammer.plugin.database.Database;
 import dev.banhammer.plugin.database.model.PunishmentRecord;
 import dev.banhammer.plugin.event.PlayerUnpunishedEvent;
 import dev.banhammer.plugin.integration.DiscordWebhook;
+import dev.banhammer.plugin.util.BanLists;
 import dev.banhammer.plugin.util.FoliaScheduler;
-import org.bukkit.BanList;
+import dev.banhammer.plugin.util.IPAnonymizer;
+import dev.banhammer.plugin.util.Settings;
 import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
 
+import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-import static dev.banhammer.plugin.util.Constants.*;
+import static dev.banhammer.plugin.util.Constants.SCHEDULER_BAN_CHECK_DELAY;
 
 /**
- * Scheduler that automatically removes expired temporary punishments.
+ * Periodic maintenance: releases expired temporary punishments and enforces data retention.
+ *
+ * <h2>Ordering</h2>
+ * Each expired record is deactivated <em>first</em>, using a compare-and-set update that only
+ * succeeds while the row is still active. All visible side effects - lifting the ban, firing
+ * the event, notifying Discord - happen only for the caller that won that update. Previously
+ * the side effects came first, so a failing database write meant the same record was
+ * reprocessed every 60 seconds forever, re-sending the Discord message each time.
  *
  * @since 3.0.0
  */
 public class UnbanScheduler {
 
+    /** Reason text written to the database and reported everywhere else. */
+    private static final String EXPIRY_REASON = "Expired automatically";
+
     private final BanHammerPlugin plugin;
     private final Database database;
-    private final DiscordWebhook discord;
+    private volatile DiscordWebhook discord;
+
     private Object task;
-    private final boolean enabled;
+    private Object retentionTask;
+
+    /** Guards against a slow run overlapping with the next tick. */
+    private final AtomicBoolean running = new AtomicBoolean(false);
 
     public UnbanScheduler(BanHammerPlugin plugin, Database database, DiscordWebhook discord) {
         this.plugin = plugin;
         this.database = database;
         this.discord = discord;
-        this.enabled = plugin.getConfig().getBoolean("tempBans.enabled", true);
+    }
+
+    /**
+     * Updates the Discord webhook reference (called on reload).
+     */
+    public void updateDiscord(DiscordWebhook discord) {
+        this.discord = discord;
     }
 
     /**
      * Starts the scheduler.
      */
     public void start() {
-        if (!enabled || database == null) {
-            plugin.getSLF4JLogger().info("Auto-unban scheduler is disabled");
+        if (database == null) {
+            plugin.getSLF4JLogger().info("Auto-unban scheduler is disabled (no database)");
             return;
         }
 
-        long checkInterval = plugin.getConfig().getLong("tempBans.checkInterval", 60) * 20L; // Convert to ticks
+        Settings.TempBans tempBans = plugin.settings().tempBans();
+        if (!tempBans.enabled()) {
+            plugin.getSLF4JLogger().info("Auto-unban scheduler is disabled in config");
+            return;
+        }
 
+        long checkIntervalTicks = tempBans.checkIntervalSeconds() * 20L;
         task = FoliaScheduler.runAsyncRepeating(
                 plugin,
                 this::checkExpiredPunishments,
                 SCHEDULER_BAN_CHECK_DELAY,
-                checkInterval
+                checkIntervalTicks
         );
+        plugin.getSLF4JLogger().info("Auto-unban scheduler started (checking every {} seconds)",
+                tempBans.checkIntervalSeconds());
 
-        plugin.getSLF4JLogger().info("Auto-unban scheduler started (checking every {} seconds)", checkInterval / 20);
+        Settings.Privacy privacy = plugin.settings().privacy();
+        if (privacy.retentionEnabled()) {
+            // Once per hour is frequent enough for a day-granularity retention window.
+            retentionTask = FoliaScheduler.runAsyncRepeating(
+                    plugin, this::purgeExpiredData, SCHEDULER_BAN_CHECK_DELAY, 20L * 3600L);
+            plugin.getSLF4JLogger().info("Data retention enabled: deleting punishments older than {} days",
+                    privacy.retentionDays());
+        }
     }
 
     /**
@@ -61,133 +99,171 @@ public class UnbanScheduler {
     public void stop() {
         if (task != null) {
             FoliaScheduler.cancelTask(task);
-            plugin.getSLF4JLogger().info("Auto-unban scheduler stopped");
+            task = null;
         }
+        if (retentionTask != null) {
+            FoliaScheduler.cancelTask(retentionTask);
+            retentionTask = null;
+        }
+        plugin.getSLF4JLogger().info("Auto-unban scheduler stopped");
     }
 
     /**
      * Checks for and removes expired punishments.
      */
     private void checkExpiredPunishments() {
-        database.getExpiredPunishments().thenAccept(expired -> {
-            if (expired.isEmpty()) return;
+        if (!running.compareAndSet(false, true)) {
+            plugin.getSLF4JLogger().debug("Previous expiry check still running, skipping this tick");
+            return;
+        }
 
-            plugin.getSLF4JLogger().debug("Found {} expired punishment(s), processing...", expired.size());
-
-            for (PunishmentRecord record : expired) {
-                processExpiredPunishment(record);
-            }
-        }).exceptionally(throwable -> {
-            plugin.getSLF4JLogger().error("Failed to check expired punishments", throwable);
-            return null;
-        });
+        database.getExpiredPunishments()
+                .thenAccept(expired -> {
+                    if (!expired.isEmpty()) {
+                        plugin.getSLF4JLogger().debug("Found {} expired punishment(s), processing...", expired.size());
+                        for (PunishmentRecord record : expired) {
+                            processExpiredPunishment(record);
+                        }
+                    }
+                })
+                .whenComplete((ignored, throwable) -> {
+                    running.set(false);
+                    if (throwable != null) {
+                        plugin.getSLF4JLogger().error("Failed to check expired punishments", throwable);
+                    }
+                });
     }
 
     /**
      * Processes a single expired punishment.
      *
-     * @param record The expired punishment record
+     * @param record the expired punishment record
      */
     private void processExpiredPunishment(PunishmentRecord record) {
-        try {
-            // Remove from Minecraft ban system
-            switch (record.getType()) {
-                case TEMP_BAN, BAN -> {
-                    BanList banList = Bukkit.getBanList(BanList.Type.NAME);
-                    banList.pardon(record.getVictimName());
-                }
-                case IP_BAN -> {
-                    // Only pardon when the REAL IP is stored (anonymization disabled).
-                    // With anonymization enabled (default) the stored value is anonymized/hashed;
-                    // temporary IP bans then expire automatically via the Minecraft ban list's
-                    // own expiry date, so no manual pardon is required here.
-                    String anonLevel = plugin.getConfig().getString("privacy.ipAnonymization", "PARTIAL").toUpperCase();
-                    if (anonLevel.equals("NONE") && record.getVictimIp() != null && isValidIP(record.getVictimIp())) {
-                        BanList ipBanList = Bukkit.getBanList(BanList.Type.IP);
-                        ipBanList.pardon(record.getVictimIp());
+        database.deactivatePunishment(record.getId(), null, EXPIRY_REASON)
+                .thenAccept(claimed -> {
+                    if (!claimed) {
+                        // Somebody else (a manual /unban, or another server sharing the
+                        // database) already handled this record.
+                        return;
                     }
-                }
-                case TEMP_MUTE, MUTE -> {
-                    // Remove from mute cache in PunishmentManager
-                    plugin.getPunishmentManager().removeMuteFromCache(record.getVictimUuid());
-                }
-                case JAIL -> {
-                    // Release from jail - use entity scheduler for teleport
-                    org.bukkit.entity.Player jailedPlayer = Bukkit.getPlayer(record.getVictimUuid());
-                    if (jailedPlayer != null && jailedPlayer.isOnline()) {
-                        FoliaScheduler.runOnEntity(plugin, jailedPlayer, () ->
-                                plugin.getJailManager().releasePlayer(jailedPlayer));
-                    } else {
-                        plugin.getJailManager().releasePlayerByUUID(record.getVictimUuid());
+
+                    record.setActive(false);
+                    record.setUnbanReason(EXPIRY_REASON);
+                    record.setUnbannedAt(Instant.now());
+
+                    lift(record);
+
+                    if (discord != null) {
+                        discord.sendUnpunishment(record, "Automatic", EXPIRY_REASON);
                     }
-                    plugin.getSLF4JLogger().info("Automatically released {} from jail (punishment expired)", record.getVictimName());
+
+                    plugin.getSLF4JLogger().debug("Automatically removed expired {} for player {}",
+                            record.getType(), record.getVictimName());
+                })
+                .exceptionally(throwable -> {
+                    plugin.getSLF4JLogger().error("Failed to deactivate punishment {} for {}",
+                            record.getId(), record.getVictimName(), throwable);
+                    return null;
+                });
+    }
+
+    /**
+     * Undoes the in-game effect of a punishment.
+     *
+     * <p>Everything here touches the Bukkit API, so it is dispatched to the main/global
+     * thread: {@code BanList} is an unsynchronized map backed by {@code banned-players.json},
+     * and on Folia these calls throw outright when made from an async thread.
+     */
+    private void lift(PunishmentRecord record) {
+        switch (record.getType()) {
+            case TEMP_BAN, BAN -> FoliaScheduler.runGlobal(plugin, () -> {
+                BanLists.pardon(record.getVictimUuid(), record.getVictimName());
+                fireEvent(record);
+                notifyIfOnline(record);
+            });
+
+            case IP_BAN -> FoliaScheduler.runGlobal(plugin, () -> {
+                // Only the real IP can be pardoned. With anonymization enabled (the default)
+                // the stored value is masked or hashed; such bans expire through the ban
+                // list's own expiry date instead.
+                String storedIp = record.getVictimIp();
+                if (plugin.settings().privacy().anonymizationLevel() == IPAnonymizer.AnonymizationLevel.NONE
+                        && storedIp != null && IPAnonymizer.isLiteralIp(storedIp)) {
+                    BanLists.pardonIp(storedIp);
                 }
+                BanLists.pardon(record.getVictimUuid(), record.getVictimName());
+                fireEvent(record);
+                notifyIfOnline(record);
+            });
+
+            case TEMP_MUTE, MUTE -> {
+                plugin.getPunishmentManager().removeMuteFromCache(record.getVictimUuid());
+                FoliaScheduler.runGlobal(plugin, () -> {
+                    fireEvent(record);
+                    notifyIfOnline(record);
+                });
             }
 
-            // Deactivate in database
-            database.deactivatePunishment(record.getId(), null, "Automatic expiration")
-                    .thenRun(() -> {
-                        record.setActive(false);
-                        record.setUnbanReason("Expired automatically");
-                        record.setUnbannedAt(Instant.now());
+            case JAIL -> {
+                Player jailed = Bukkit.getPlayer(record.getVictimUuid());
+                if (jailed != null && jailed.isOnline()) {
+                    FoliaScheduler.runOnEntity(plugin, jailed,
+                            () -> plugin.getJailManager().releasePlayer(jailed),
+                            () -> plugin.getJailManager().releasePlayerByUUID(record.getVictimUuid()));
+                } else {
+                    plugin.getJailManager().releasePlayerByUUID(record.getVictimUuid());
+                }
+                plugin.getSLF4JLogger().info("Automatically released {} from jail (punishment expired)",
+                        record.getVictimName());
+                FoliaScheduler.runGlobal(plugin, () -> fireEvent(record));
+            }
 
-                        // Fire event on global/main thread
-                        FoliaScheduler.runGlobal(plugin, () -> {
-                            PlayerUnpunishedEvent event = new PlayerUnpunishedEvent(
-                                    null,
-                                    record,
-                                    "Expired automatically",
-                                    true
-                            );
-                            Bukkit.getPluginManager().callEvent(event);
-                        });
+            default -> {
+                // WARNING never expires (it is stored inactive), so reaching here means a new
+                // punishment type was added without teaching the scheduler how to lift it.
+                plugin.getSLF4JLogger().warn("No expiry handling for punishment type {} (record #{}); "
+                        + "the database row was deactivated but nothing was undone in-game",
+                        record.getType(), record.getId());
+                FoliaScheduler.runGlobal(plugin, () -> fireEvent(record));
+            }
+        }
+    }
 
-                        // Discord notification
-                        if (discord != null) {
-                            discord.sendUnpunishment(record, "Automatic", "Punishment expired");
-                        }
+    private void fireEvent(PunishmentRecord record) {
+        Bukkit.getPluginManager().callEvent(new PlayerUnpunishedEvent(null, record, EXPIRY_REASON, true));
+    }
 
-                        plugin.getSLF4JLogger().debug("Automatically removed expired {} for player {}",
-                                record.getType(), record.getVictimName());
-                    })
-                    .exceptionally(throwable -> {
-                        plugin.getSLF4JLogger().error("Failed to deactivate punishment {} for {}",
-                                record.getId(), record.getVictimName(), throwable);
-                        return null;
-                    });
-
-        } catch (Exception e) {
-            plugin.getSLF4JLogger().error("Failed to process expired punishment for {}", record.getVictimName(), e);
+    private void notifyIfOnline(PunishmentRecord record) {
+        if (!plugin.settings().tempBans().notifyOnExpire()) {
+            return;
+        }
+        Player player = Bukkit.getPlayer(record.getVictimUuid());
+        if (player != null && player.isOnline()) {
+            player.sendMessage(plugin.messages().prefix().append(plugin.messages().unbanned(record.getVictimName())));
         }
     }
 
     /**
-     * Validates if a string is a valid IP address (IPv4 or IPv6).
-     * Uses InetAddress for proper validation including compressed IPv6 notation.
-     *
-     * @param ip The IP address string to validate
-     * @return true if valid IP address, false otherwise
+     * Deletes punishment history older than the configured retention window.
      */
-    private boolean isValidIP(String ip) {
-        if (ip == null || ip.isEmpty()) {
-            return false;
+    private void purgeExpiredData() {
+        Settings.Privacy privacy = plugin.settings().privacy();
+        if (!privacy.retentionEnabled()) {
+            return;
         }
 
-        // Quick check: hashed IPs (from IPAnonymizer) are hex strings, not valid IPs
-        // They won't contain dots or colons
-        if (!ip.contains(".") && !ip.contains(":")) {
-            return false;
-        }
-
-        // Use Java's InetAddress for robust IP validation
-        // This handles both IPv4 and all IPv6 formats (including ::1, fe80::, etc.)
-        try {
-            java.net.InetAddress addr = java.net.InetAddress.getByName(ip);
-            // Ensure it's actually a numeric IP and not a hostname that was resolved
-            String normalized = addr.getHostAddress();
-            return normalized.equals(ip) || ip.equals("[" + normalized + "]");
-        } catch (java.net.UnknownHostException e) {
-            return false;
-        }
+        Instant cutoff = Instant.now().minus(Duration.ofDays(privacy.retentionDays()));
+        database.purgeOldPunishments(cutoff, privacy.retentionKeepActive())
+                .thenAccept(deleted -> {
+                    if (deleted > 0) {
+                        plugin.getSLF4JLogger().info("Data retention: deleted {} punishment(s) older than {} days",
+                                deleted, privacy.retentionDays());
+                    }
+                })
+                .exceptionally(throwable -> {
+                    plugin.getSLF4JLogger().error("Data retention purge failed", throwable);
+                    return null;
+                });
     }
 }

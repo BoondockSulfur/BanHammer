@@ -2,95 +2,122 @@ package dev.banhammer.plugin.listener;
 
 import dev.banhammer.plugin.BanHammerPlugin;
 import dev.banhammer.plugin.database.model.PunishmentRecord;
-import dev.banhammer.plugin.database.model.PunishmentType;
+import dev.banhammer.plugin.util.DurationParser;
+import dev.banhammer.plugin.util.Settings;
 import io.papermc.paper.event.player.AsyncChatEvent;
-import net.kyori.adventure.text.Component;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.SignChangeEvent;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
+import org.bukkit.event.player.PlayerEditBookEvent;
 
+import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Locale;
 
 /**
- * Handles mute enforcement by blocking chat and optionally commands.
+ * Enforces mutes: blocks chat, configured commands, signs and books.
+ *
+ * <p>The listener is always registered and consults the configuration per event, so toggling
+ * {@code punishmentTypes.mute.*} and running {@code /bh reload} takes effect immediately. It
+ * used to read its blocked-command list once in the constructor, which meant changes needed a
+ * full server restart.
  *
  * @since 3.0.0
  */
 public class MuteListener implements Listener {
 
     private final BanHammerPlugin plugin;
-    private final Set<String> blockedCommands;
 
     public MuteListener(BanHammerPlugin plugin) {
         this.plugin = plugin;
-        this.blockedCommands = ConcurrentHashMap.newKeySet();
-
-        // Load blocked commands from config
-        List<String> configCommands = plugin.getConfig().getStringList("punishmentTypes.mute.blockedCommands");
-        if (configCommands.isEmpty()) {
-            // Default blocked commands
-            blockedCommands.add("msg");
-            blockedCommands.add("tell");
-            blockedCommands.add("w");
-            blockedCommands.add("r");
-            blockedCommands.add("me");
-            blockedCommands.add("say");
-        } else {
-            blockedCommands.addAll(configCommands);
-        }
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onChat(AsyncChatEvent event) {
-        Player player = event.getPlayer();
-
-        if (!plugin.getConfig().getBoolean("punishmentTypes.mute.preventChat", true)) {
+        Settings.Mute mute = plugin.settings().mute();
+        if (!mute.enabled() || !mute.preventChat()) {
             return;
         }
 
-        // Check if player is muted (synchronous cache check to prevent race condition)
-        PunishmentRecord muteRecord = plugin.getPunishmentManager().getActiveMute(player.getUniqueId());
-
-        if (muteRecord != null) {
+        PunishmentRecord record = activeMute(event.getPlayer());
+        if (record != null) {
             event.setCancelled(true);
-            player.sendMessage(plugin.messages().muteChatBlocked(formatTimeRemaining(muteRecord)));
+            event.getPlayer().sendMessage(plugin.messages().muteChatBlocked(formatTimeRemaining(record)));
         }
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onCommand(PlayerCommandPreprocessEvent event) {
-        Player player = event.getPlayer();
-
-        if (!plugin.getConfig().getBoolean("punishmentTypes.mute.preventCommands", true)) {
+        Settings.Mute mute = plugin.settings().mute();
+        if (!mute.enabled() || !mute.preventCommands()) {
             return;
         }
 
-        String message = event.getMessage().toLowerCase();
-        String command = message.split(" ")[0].replace("/", "");
+        String command = event.getMessage().toLowerCase(Locale.ROOT).split(" ")[0].replace("/", "");
 
-        // Strip plugin namespace so e.g. "/minecraft:msg" is treated as "msg"
+        // Strip the plugin namespace so "/minecraft:msg" is treated as "msg".
         int colon = command.indexOf(':');
         if (colon >= 0) {
             command = command.substring(colon + 1);
         }
 
-        // Check if command should be blocked
-        if (!blockedCommands.contains(command)) {
+        if (!mute.blockedCommands().contains(command)) {
             return;
         }
 
-        // Check if player is muted (synchronous cache check to prevent race condition)
-        PunishmentRecord muteRecord = plugin.getPunishmentManager().getActiveMute(player.getUniqueId());
-
-        if (muteRecord != null) {
+        PunishmentRecord record = activeMute(event.getPlayer());
+        if (record != null) {
             event.setCancelled(true);
-            player.sendMessage(plugin.messages().muteCommandBlocked(formatTimeRemaining(muteRecord)));
+            event.getPlayer().sendMessage(plugin.messages().muteCommandBlocked(formatTimeRemaining(record)));
         }
+    }
+
+    /**
+     * Blocks sign text.
+     *
+     * <p>A sign is a chat channel: without this a muted player just writes what they wanted to
+     * say on a sign and places it in spawn.
+     */
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    public void onSignChange(SignChangeEvent event) {
+        Settings.Mute mute = plugin.settings().mute();
+        if (!mute.enabled() || !mute.preventSigns()) {
+            return;
+        }
+
+        PunishmentRecord record = activeMute(event.getPlayer());
+        if (record != null) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage(plugin.messages().muteChatBlocked(formatTimeRemaining(record)));
+        }
+    }
+
+    /**
+     * Blocks writing and signing books, for the same reason as signs.
+     */
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    public void onEditBook(PlayerEditBookEvent event) {
+        Settings.Mute mute = plugin.settings().mute();
+        if (!mute.enabled() || !mute.preventBooks()) {
+            return;
+        }
+
+        PunishmentRecord record = activeMute(event.getPlayer());
+        if (record != null) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage(plugin.messages().muteChatBlocked(formatTimeRemaining(record)));
+        }
+    }
+
+    /**
+     * Looks up the mute from the in-memory cache; never touches the database, because chat
+     * events arrive on the netty threads and must not block.
+     */
+    private PunishmentRecord activeMute(Player player) {
+        return plugin.getPunishmentManager().getActiveMute(player.getUniqueId());
     }
 
     private String formatTimeRemaining(PunishmentRecord record) {
@@ -98,23 +125,10 @@ public class MuteListener implements Listener {
             return "permanent";
         }
 
-        long secondsRemaining = Instant.now().until(record.getExpiresAt(), java.time.temporal.ChronoUnit.SECONDS);
-
-        if (secondsRemaining <= 0) {
-            return "abgelaufen";
+        Duration remaining = Duration.between(Instant.now(), record.getExpiresAt());
+        if (remaining.isNegative() || remaining.isZero()) {
+            return "0s";
         }
-
-        long days = secondsRemaining / 86400;
-        long hours = (secondsRemaining % 86400) / 3600;
-        long minutes = (secondsRemaining % 3600) / 60;
-        long seconds = secondsRemaining % 60;
-
-        StringBuilder sb = new StringBuilder();
-        if (days > 0) sb.append(days).append("d ");
-        if (hours > 0) sb.append(hours).append("h ");
-        if (minutes > 0) sb.append(minutes).append("m ");
-        if (seconds > 0 && days == 0) sb.append(seconds).append("s");
-
-        return sb.toString().trim();
+        return DurationParser.formatHuman(remaining);
     }
 }

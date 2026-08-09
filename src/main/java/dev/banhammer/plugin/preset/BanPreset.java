@@ -62,24 +62,7 @@ public class BanPreset {
         if (duration == null) {
             return "Permanent";
         }
-
-        long seconds = duration.getSeconds();
-        long days = seconds / 86400;
-        long hours = (seconds % 86400) / 3600;
-        long minutes = (seconds % 3600) / 60;
-
-        StringBuilder sb = new StringBuilder();
-        if (days > 0) sb.append(days).append("d");
-        if (hours > 0) {
-            if (sb.length() > 0) sb.append(" ");
-            sb.append(hours).append("h");
-        }
-        if (minutes > 0 && days == 0) { // Don't show minutes if days are shown
-            if (sb.length() > 0) sb.append(" ");
-            sb.append(minutes).append("m");
-        }
-
-        return sb.length() > 0 ? sb.toString() : "0s";
+        return dev.banhammer.plugin.util.DurationParser.formatHuman(duration);
     }
 
     @Override

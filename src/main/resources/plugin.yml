@@ -1,19 +1,32 @@
 name: BanHammer
 main: dev.banhammer.plugin.BanHammerPlugin
-version: 4.0.1
+version: 4.1.0
 api-version: '26.1'
 load: POSTWORLD
 folia-supported: true
 softdepend: [Essentials]
 
+# Resolved from Maven Central by Paper at startup and loaded in an isolated class loader.
+# This keeps the plugin jar small (SQLite alone bundles native binaries for every platform)
+# and removes any chance of clashing with another plugin that ships the same libraries.
+# Note: the server needs internet access the first time - the artifacts are then cached
+# under the server's "libraries" folder.
+# Keep these versions in sync with the properties in pom.xml.
+libraries:
+  - com.zaxxer:HikariCP:5.1.0
+  - org.xerial:sqlite-jdbc:3.47.1.0
+  - com.mysql:mysql-connector-j:9.1.0
+  - com.google.code.gson:gson:2.11.0
+  - club.minnced:discord-webhooks:0.8.4
+
 commands:
   banhammer:
     description: Admin ban hammer
-    usage: /banhammer [give|reload|history|unban|stats|appeals|approve|deny|gui]
+    usage: /banhammer [give|reload|history|unban|stats|gui|appeals|approve|deny]
     permission: banhammer.command
     aliases: [bh]
   appeal:
-    description: Submit a ban appeal
+    description: Contest an active punishment
     usage: /appeal <text>
     permission: banhammer.appeal
   mute:
@@ -43,38 +56,59 @@ commands:
 
 permissions:
   banhammer.command:
+    description: Access to /banhammer
     default: op
   banhammer.use:
+    description: Can use the BanHammer item
     default: op
   banhammer.give:
+    description: Can give the hammer to others
     default: op
   banhammer.reload:
+    description: Can reload the configuration
     default: op
   banhammer.bypass:
+    description: Immune to all punishments issued by BanHammer
     default: op
   banhammer.history:
+    description: Can view punishment history
     default: op
   banhammer.history.others:
+    description: Can view other players' history
     default: op
   banhammer.unban:
+    description: Can unban players
     default: op
   banhammer.stats:
+    description: Can view statistics and the statistics GUI
+    default: op
+  banhammer.stats.others:
+    description: Can view other players' statistics
     default: op
   banhammer.appeals:
+    description: Can view pending appeals
     default: op
   banhammer.appeals.review:
+    description: Can approve or deny appeals
     default: op
   banhammer.appeal:
+    description: Can file an appeal
     default: true
   banhammer.ipban:
+    description: Can issue IP bans with the hammer
     default: op
   banhammer.mute:
+    description: Can mute and unmute players
     default: op
   banhammer.jail:
+    description: Can jail and release players
     default: op
   banhammer.warn:
+    description: Can warn players
     default: op
   banhammer.setjail:
+    description: Can set the jail location
     default: op
   banhammer.updatenotify:
+    description: Receives update notifications on join
     default: op

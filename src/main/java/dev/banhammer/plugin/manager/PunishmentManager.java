@@ -8,12 +8,18 @@ import dev.banhammer.plugin.event.PlayerPunishEvent;
 import dev.banhammer.plugin.event.PlayerPunishedEvent;
 import dev.banhammer.plugin.event.PlayerUnpunishedEvent;
 import dev.banhammer.plugin.integration.DiscordWebhook;
+import dev.banhammer.plugin.util.BanLists;
+import dev.banhammer.plugin.util.Constants;
 import dev.banhammer.plugin.util.DurationParser;
-import dev.banhammer.plugin.util.IPAnonymizer;
 import dev.banhammer.plugin.util.FoliaScheduler;
+import dev.banhammer.plugin.util.IPAnonymizer;
+import dev.banhammer.plugin.util.PunishmentLogger;
+import dev.banhammer.plugin.util.Settings;
 import net.kyori.adventure.text.Component;
 import org.bukkit.BanList;
 import org.bukkit.Bukkit;
+import org.bukkit.OfflinePlayer;
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 
 import java.time.Duration;
@@ -26,35 +32,85 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Central manager for all punishment operations.
- * Handles bans, kicks, mutes, and other punishments.
+ *
+ * <p>Every entry point takes a {@link CommandSender} rather than a {@link Player}, so
+ * punishments can also be issued from the console, RCON or a command block. Console actions
+ * are attributed to {@link Constants#CONSOLE_UUID}.
  *
  * @since 3.0.0
  */
 public class PunishmentManager {
 
+    /** Punishment types that count as "banned". */
+    private static final List<PunishmentType> BAN_TYPES =
+            List.of(PunishmentType.BAN, PunishmentType.TEMP_BAN, PunishmentType.IP_BAN);
+
+    /** Punishment types that count as "muted". */
+    private static final List<PunishmentType> MUTE_TYPES =
+            List.of(PunishmentType.MUTE, PunishmentType.TEMP_MUTE);
+
     private final BanHammerPlugin plugin;
+    private final PunishmentLogger auditLog;
     private volatile Database database;
     private volatile DiscordWebhook discord;
-    private volatile boolean databaseEnabled;
-    private final String serverName;
 
-    // Cache for active mutes to prevent race conditions in async checks
+    /** Cache for active mutes so the chat handler never has to hit the database. */
     private final Map<UUID, PunishmentRecord> activeMutes = new ConcurrentHashMap<>();
 
     public PunishmentManager(BanHammerPlugin plugin, Database database, DiscordWebhook discord) {
         this.plugin = plugin;
         this.database = database;
         this.discord = discord;
-        this.databaseEnabled = plugin.getConfig().getBoolean("database.enabled", false);
-        this.serverName = plugin.getConfig().getString("database.serverName", "Unknown");
+        this.auditLog = new PunishmentLogger(plugin);
     }
 
     /**
-     * Updates the database reference (called after async DB initialization).
+     * Outcome of a punishment attempt.
+     *
+     * @param status   what happened
+     * @param recordId the database ID, or 0 when running without a database
+     */
+    public record PunishmentResult(Status status, int recordId) {
+
+        public enum Status {
+            /** The punishment was applied. */
+            SUCCESS,
+            /** Another plugin cancelled {@link PlayerPunishEvent}. */
+            CANCELLED,
+            /** The target is protected (bypass permission, or self-punishment). */
+            NOT_PERMITTED,
+            /** The punishment could not be applied; see the server log. */
+            FAILED
+        }
+
+        public static PunishmentResult success(int recordId) {
+            return new PunishmentResult(Status.SUCCESS, recordId);
+        }
+
+        public static PunishmentResult cancelled() {
+            return new PunishmentResult(Status.CANCELLED, -1);
+        }
+
+        public static PunishmentResult notPermitted() {
+            return new PunishmentResult(Status.NOT_PERMITTED, -1);
+        }
+
+        public static PunishmentResult failed() {
+            return new PunishmentResult(Status.FAILED, -1);
+        }
+
+        public boolean isSuccess() {
+            return status == Status.SUCCESS;
+        }
+    }
+
+    // ==================== Wiring ====================
+
+    /**
+     * Updates the database reference (called after async DB initialization and on reload).
      */
     public void updateDatabase(Database database) {
         this.database = database;
-        this.databaseEnabled = (database != null);
     }
 
     /**
@@ -65,131 +121,127 @@ public class PunishmentManager {
     }
 
     /**
+     * @return true if a database is configured and currently usable
+     */
+    public boolean isDatabaseEnabled() {
+        Database current = database;
+        return current != null && current.isConnected();
+    }
+
+    // ==================== Guards and identity ====================
+
+    /**
+     * Checks whether a staff member may punish a target.
+     *
+     * <p>Applies to every path - hammer and command alike. Previously only the hammer
+     * consulted the bypass permission, so a moderator could still mute or jail a protected
+     * player through the commands.
+     *
+     * @return true if the punishment may proceed
+     */
+    public boolean canPunish(CommandSender staff, Player victim) {
+        if (!(staff instanceof Player staffPlayer)) {
+            return true; // Console is unrestricted.
+        }
+        if (staffPlayer.getUniqueId().equals(victim.getUniqueId())) {
+            return false; // No self-punishment.
+        }
+        return !victim.hasPermission("banhammer.bypass") && !victim.isOp();
+    }
+
+    private static UUID staffUuid(CommandSender staff) {
+        return staff instanceof Player player ? player.getUniqueId() : Constants.CONSOLE_UUID;
+    }
+
+    private static String staffName(CommandSender staff) {
+        return staff instanceof Player player ? player.getName() : Constants.CONSOLE_NAME;
+    }
+
+    // ==================== Bans ====================
+
+    /**
      * Bans a player permanently or temporarily.
      *
-     * @param staff The staff member issuing the ban
-     * @param victim The player to ban
-     * @param reason The ban reason
-     * @param duration The ban duration (null for permanent)
-     * @param ipBan Whether to also IP ban
-     * @return CompletableFuture with the punishment record ID
+     * @param staff    the staff member issuing the ban
+     * @param victim   the player to ban
+     * @param reason   the ban reason
+     * @param duration the ban duration, or {@code null} for permanent
+     * @param ipBan    whether to also IP ban
+     * @return the outcome
      */
-    public CompletableFuture<Integer> banPlayer(Player staff, Player victim, String reason, Duration duration, boolean ipBan) {
-        // Fire pre-event
-        PunishmentType type = ipBan ? PunishmentType.IP_BAN : (duration == null ? PunishmentType.BAN : PunishmentType.TEMP_BAN);
-        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, type, reason, duration);
-        Bukkit.getPluginManager().callEvent(event);
-
-        if (event.isCancelled()) {
-            return CompletableFuture.completedFuture(-1);
+    public CompletableFuture<PunishmentResult> banPlayer(CommandSender staff, Player victim, String reason,
+                                                         Duration duration, boolean ipBan) {
+        if (!canPunish(staff, victim)) {
+            return CompletableFuture.completedFuture(PunishmentResult.notPermitted());
         }
 
-        // Use updated values from event
+        PunishmentType requestedType = ipBan
+                ? PunishmentType.IP_BAN
+                : (duration == null ? PunishmentType.BAN : PunishmentType.TEMP_BAN);
+
+        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, requestedType, reason, duration);
+        Bukkit.getPluginManager().callEvent(event);
+        if (event.isCancelled()) {
+            return CompletableFuture.completedFuture(PunishmentResult.cancelled());
+        }
+
         String finalReason = event.getReason();
         Duration finalDuration = event.getDuration();
-
-        // Calculate expiration
         Instant expiresAt = finalDuration != null ? Instant.now().plus(finalDuration) : null;
 
-        // Debug logging
-        if (expiresAt == null) {
-            plugin.getSLF4JLogger().info("Applying PERMANENT ban to {}", victim.getName());
-        } else {
-            long seconds = java.time.Duration.between(Instant.now(), expiresAt).getSeconds();
-            plugin.getSLF4JLogger().info("Applying TEMPORARY ban to {} for {} seconds (expires at {})",
-                    victim.getName(), seconds, expiresAt);
+        // Re-derive the type: a listener may have turned a temp ban into a permanent one, and
+        // storing TEMP_BAN with no expiry would leave a row the unban scheduler never lifts.
+        PunishmentType type = ipBan
+                ? PunishmentType.IP_BAN
+                : (finalDuration == null ? PunishmentType.BAN : PunishmentType.TEMP_BAN);
+
+        // Read the address BEFORE kicking - once the connection is closed getAddress()
+        // returns null and the IP ban record would end up without an IP.
+        String rawIp = rawAddress(victim);
+        String storedIp = null;
+        Settings.IpBan ipSettings = plugin.settings().ipBan();
+        if (ipBan && ipSettings.trackIps() && rawIp != null) {
+            Settings.Privacy privacy = plugin.settings().privacy();
+            storedIp = IPAnonymizer.anonymize(rawIp, privacy.anonymizationLevel(), privacy.hashSalt());
         }
 
-        // Apply Minecraft ban
         try {
-            BanList banList = Bukkit.getBanList(BanList.Type.NAME);
-            banList.addBan(
-                    victim.getName(),
-                    finalReason,
-                    expiresAt != null ? java.util.Date.from(expiresAt) : null,
-                    staff.getName()
-            );
+            java.util.Date expiryDate = expiresAt != null ? java.util.Date.from(expiresAt) : null;
 
-            // IP ban if requested
-            if (ipBan && victim.getAddress() != null) {
-                String ip = victim.getAddress().getAddress().getHostAddress();
-                BanList ipBanList = Bukkit.getBanList(BanList.Type.IP);
-                ipBanList.addBan(ip, finalReason, expiresAt != null ? java.util.Date.from(expiresAt) : null, staff.getName());
+            // Banned by account, not by name: a name ban is shed by simply renaming, and
+            // whoever later claims that name inherits it.
+            BanLists.ban(victim.getUniqueId(), victim.getName(), finalReason, expiryDate, staffName(staff));
+
+            if (ipBan && rawIp != null) {
+                BanLists.banIp(rawIp, finalReason, expiryDate, staffName(staff));
             }
 
-            // Kick player
             victim.kick(Component.text(finalReason != null ? finalReason : ""));
         } catch (Exception e) {
-            plugin.getSLF4JLogger().error("Failed to ban player", e);
-            return CompletableFuture.failedFuture(e);
+            plugin.getSLF4JLogger().error("Failed to ban player {}", victim.getName(), e);
+            return CompletableFuture.completedFuture(PunishmentResult.failed());
         }
 
-        // Create punishment record (for database and/or Discord)
-        String ipAddress = null;
-        if (ipBan && plugin.getConfig().getBoolean("ipBan.trackIps", true) && victim.getAddress() != null) {
-            String rawIP = victim.getAddress().getAddress().getHostAddress();
-            String levelStr = plugin.getConfig().getString("privacy.ipAnonymization", "PARTIAL");
-            IPAnonymizer.AnonymizationLevel level = IPAnonymizer.AnonymizationLevel.valueOf(levelStr.toUpperCase());
-            String salt = plugin.getConfig().getString("privacy.ipHashSalt", "banhammer-secret-salt");
-            ipAddress = IPAnonymizer.anonymize(rawIP, level, salt);
-        }
+        PunishmentRecord record = newRecord(staff, victim, type, finalReason, expiresAt);
+        record.setVictimIp(storedIp);
 
-        PunishmentRecord record = new PunishmentRecord(
-                victim.getUniqueId(),
-                victim.getName(),
-                ipAddress,
-                staff.getUniqueId(),
-                staff.getName(),
-                type,
-                finalReason,
-                Instant.now(),
-                expiresAt
-        );
-        record.setServerName(serverName);
-
-        // Save to database if enabled
-        if (databaseEnabled && database != null) {
-            return database.savePunishment(record).thenApply(id -> {
-                record.setId(id);
-
-                // Fire post-event
-                PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-                FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
-
-                // Discord notification
-                if (discord != null) {
-                    discord.sendPunishment(record);
-                }
-
-                return id;
-            });
-        } else {
-            // Database disabled, still send Discord notification and fire event
-            PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-            FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
-
-            if (discord != null) {
-                discord.sendPunishment(record);
-            }
-
-            return CompletableFuture.completedFuture(0);
-        }
+        // Supersede any ban that is still marked active, so history has one active row.
+        return supersede(victim.getUniqueId(), BAN_TYPES, staff, "Replaced by a new ban")
+                .thenCompose(ignored -> persistAndAnnounce(staff, victim.getName(), record));
     }
 
     /**
      * Kicks a player.
-     *
-     * @param staff The staff member issuing the kick
-     * @param victim The player to kick
-     * @param reason The kick reason
-     * @return CompletableFuture with the punishment record ID
      */
-    public CompletableFuture<Integer> kickPlayer(Player staff, Player victim, String reason) {
+    public CompletableFuture<PunishmentResult> kickPlayer(CommandSender staff, Player victim, String reason) {
+        if (!canPunish(staff, victim)) {
+            return CompletableFuture.completedFuture(PunishmentResult.notPermitted());
+        }
+
         PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, PunishmentType.KICK, reason, null);
         Bukkit.getPluginManager().callEvent(event);
-
         if (event.isCancelled()) {
-            return CompletableFuture.completedFuture(-1);
+            return CompletableFuture.completedFuture(PunishmentResult.cancelled());
         }
 
         String finalReason = event.getReason();
@@ -197,594 +249,540 @@ public class PunishmentManager {
         try {
             victim.kick(Component.text(finalReason != null ? finalReason : ""));
         } catch (Exception e) {
-            plugin.getSLF4JLogger().error("Failed to kick player", e);
-            return CompletableFuture.failedFuture(e);
+            plugin.getSLF4JLogger().error("Failed to kick player {}", victim.getName(), e);
+            return CompletableFuture.completedFuture(PunishmentResult.failed());
         }
 
-        // Create punishment record
-        PunishmentRecord record = new PunishmentRecord(
-                victim.getUniqueId(),
-                victim.getName(),
-                null,
-                staff.getUniqueId(),
-                staff.getName(),
-                PunishmentType.KICK,
-                finalReason,
-                Instant.now(),
-                null
-        );
-        record.setServerName(serverName);
-        record.setActive(false); // Kicks are not "active" punishments
+        PunishmentRecord record = newRecord(staff, victim, PunishmentType.KICK, finalReason, null);
+        record.setActive(false); // A kick is instantaneous, never "active".
 
-        if (databaseEnabled && database != null) {
-            return database.savePunishment(record).thenApply(id -> {
-                record.setId(id);
-
-                PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-                FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
-
-                if (discord != null) {
-                    discord.sendPunishment(record);
-                }
-
-                return id;
-            });
-        } else {
-            // Database disabled, still send Discord notification and fire event
-            PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-            FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
-
-            if (discord != null) {
-                discord.sendPunishment(record);
-            }
-
-            return CompletableFuture.completedFuture(0);
-        }
+        return persistAndAnnounce(staff, victim.getName(), record);
     }
 
     /**
-     * Unbans a player.
+     * Removes a ban.
      *
-     * @param staff The staff member removing the ban
-     * @param playerName The player name to unban
-     * @param reason The reason for unbanning
-     * @return CompletableFuture that completes when unbanning is done
+     * @return true if an active ban was found and lifted
      */
-    public CompletableFuture<Void> unbanPlayer(Player staff, String playerName, String reason) {
-        // Remove from Minecraft ban list
-        BanList banList = Bukkit.getBanList(BanList.Type.NAME);
-        banList.pardon(playerName);
+    public CompletableFuture<Boolean> unbanPlayer(CommandSender staff, String playerName, String reason) {
+        UUID playerUuid = resolvePlayerUuid(playerName);
 
-        if (databaseEnabled && database != null) {
-            // Find active ban in database
-            UUID playerUuid = resolvePlayerUuid(playerName);
+        // BanList is not thread-safe and this can be reached from a database callback
+        // (for instance when an appeal is approved), so always go through the main thread.
+        CompletableFuture<Boolean> vanillaPardon = new CompletableFuture<>();
+        FoliaScheduler.runGlobal(plugin, () -> vanillaPardon.complete(
+                BanLists.pardon(playerUuid, playerName)));
 
-            // Search for all ban types (BAN, TEMP_BAN, IP_BAN)
-            return database.getActivePunishments(playerUuid)
-                    .thenCompose(allPunishments -> {
-                        PunishmentRecord record = allPunishments.stream()
-                                .filter(p -> p.getType() == PunishmentType.BAN ||
-                                             p.getType() == PunishmentType.TEMP_BAN ||
-                                             p.getType() == PunishmentType.IP_BAN)
-                                .findFirst()
-                                .orElse(null);
+        Database current = database;
+        if (current == null || playerUuid == null) {
+            // Nothing to reconcile in the database, so the vanilla ban list decides whether
+            // anything was actually lifted.
+            return vanillaPardon;
+        }
 
-                        if (record != null) {
-                            // Also remove IP ban if applicable.
-                            // The stored victimIp is only the REAL IP when anonymization is
-                            // disabled. With anonymization enabled (default) the stored value is
-                            // anonymized/hashed and must not be passed to pardon() - the real IP
-                            // has to be removed via the vanilla /pardon-ip command instead.
-                            if (record.getType() == PunishmentType.IP_BAN && record.getVictimIp() != null) {
-                                String anonLevel = plugin.getConfig().getString("privacy.ipAnonymization", "PARTIAL").toUpperCase();
-                                if (anonLevel.equals("NONE")) {
-                                    BanList ipBanList = Bukkit.getBanList(BanList.Type.IP);
-                                    ipBanList.pardon(record.getVictimIp());
-                                } else {
-                                    plugin.getSLF4JLogger().warn("IP-Bann von {} kann nicht automatisch entfernt werden " +
-                                            "(IP anonymisiert: {}). Bitte /pardon-ip manuell verwenden.",
-                                            record.getVictimName(), anonLevel);
-                                }
-                            }
+        return current.getActivePunishments(playerUuid).thenCompose(active -> {
+            PunishmentRecord record = active.stream()
+                    .filter(p -> BAN_TYPES.contains(p.getType()))
+                    .findFirst()
+                    .orElse(null);
 
-                            return database.deactivatePunishment(record.getId(), staff.getUniqueId(), reason)
-                                    .thenRun(() -> {
-                                        record.setActive(false);
-                                        record.setUnbanStaffUuid(staff.getUniqueId());
-                                        record.setUnbanReason(reason);
-                                        record.setUnbannedAt(Instant.now());
+            if (record == null) {
+                // No database record, but the player may still have been on the ban list.
+                return vanillaPardon;
+            }
 
-                                        PlayerUnpunishedEvent event = new PlayerUnpunishedEvent(staff, record, reason, false);
-                                        FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(event));
+            pardonIpIfPossible(record);
 
-                                        if (discord != null) {
-                                            discord.sendUnpunishment(record, staff.getName(), reason);
-                                        }
-                                    });
+            return current.deactivatePunishment(record.getId(), staffUuid(staff), reason)
+                    .thenApply(claimed -> {
+                        if (claimed) {
+                            announceRemoval(staff, record, reason);
                         }
-                        return CompletableFuture.completedFuture(null);
+                        return claimed;
                     });
-        }
-
-        return CompletableFuture.completedFuture(null);
-    }
-
-    /**
-     * Gets punishment history for a player.
-     *
-     * @param playerUuid The player's UUID
-     * @param limit Maximum number of records
-     * @return CompletableFuture with the list of punishments
-     */
-    public CompletableFuture<List<PunishmentRecord>> getHistory(UUID playerUuid, int limit) {
-        if (databaseEnabled && database != null) {
-            return database.getPunishmentsByPlayer(playerUuid, limit);
-        }
-        return CompletableFuture.completedFuture(List.of());
-    }
-
-    /**
-     * Gets active punishments for a player.
-     *
-     * @param playerUuid The player's UUID
-     * @return CompletableFuture with the list of active punishments
-     */
-    public CompletableFuture<List<PunishmentRecord>> getActivePunishments(UUID playerUuid) {
-        if (databaseEnabled && database != null) {
-            return database.getActivePunishments(playerUuid);
-        }
-        return CompletableFuture.completedFuture(List.of());
-    }
-
-    /**
-     * Checks if database is enabled.
-     *
-     * @return true if database is enabled
-     */
-    public boolean isDatabaseEnabled() {
-        return databaseEnabled && database != null && database.isConnected();
-    }
-
-    /**
-     * Mutes a player permanently or temporarily.
-     *
-     * @param staff The staff member issuing the mute
-     * @param victim The player to mute
-     * @param reason The mute reason
-     * @param duration The mute duration (null for permanent)
-     * @return CompletableFuture with the punishment record ID
-     */
-    public CompletableFuture<Integer> mutePlayer(Player staff, Player victim, String reason, Duration duration) {
-        PunishmentType type = duration == null ? PunishmentType.MUTE : PunishmentType.TEMP_MUTE;
-        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, type, reason, duration);
-        Bukkit.getPluginManager().callEvent(event);
-
-        if (event.isCancelled()) {
-            return CompletableFuture.completedFuture(-1);
-        }
-
-        String finalReason = event.getReason();
-        Duration finalDuration = event.getDuration();
-        Instant expiresAt = finalDuration != null ? Instant.now().plus(finalDuration) : null;
-
-        // Create punishment record
-        PunishmentRecord record = new PunishmentRecord(
-                victim.getUniqueId(),
-                victim.getName(),
-                null,
-                staff.getUniqueId(),
-                staff.getName(),
-                type,
-                finalReason,
-                Instant.now(),
-                expiresAt
-        );
-        record.setServerName(serverName);
-
-        if (databaseEnabled && database != null) {
-            return database.savePunishment(record).thenApply(id -> {
-                record.setId(id);
-
-                // Add to active mutes cache
-                activeMutes.put(victim.getUniqueId(), record);
-
-                PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-                FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
-
-                if (discord != null) {
-                    discord.sendPunishment(record);
-                }
-
-                return id;
-            });
-        } else {
-            // Database disabled, still send Discord notification and fire event
-            // Note: Without database, mutes won't persist across restarts
-            activeMutes.put(victim.getUniqueId(), record);
-
-            PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-            FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
-
-            if (discord != null) {
-                discord.sendPunishment(record);
-            }
-
-            return CompletableFuture.completedFuture(0);
-        }
-    }
-
-    /**
-     * Unmutes a player.
-     *
-     * @param staff The staff member removing the mute
-     * @param playerName The player name to unmute
-     * @param reason The reason for unmuting
-     * @return CompletableFuture that completes when unmuting is done
-     */
-    public CompletableFuture<Void> unmutePlayer(Player staff, String playerName, String reason) {
-        if (databaseEnabled && database != null) {
-            UUID playerUuid = resolvePlayerUuid(playerName);
-
-            // Search for all mute types (MUTE, TEMP_MUTE)
-            return database.getActivePunishments(playerUuid)
-                    .thenCompose(allPunishments -> {
-                        PunishmentRecord record = allPunishments.stream()
-                                .filter(p -> p.getType() == PunishmentType.MUTE ||
-                                             p.getType() == PunishmentType.TEMP_MUTE)
-                                .findFirst()
-                                .orElse(null);
-
-                        if (record != null) {
-                            return database.deactivatePunishment(record.getId(), staff.getUniqueId(), reason)
-                                    .thenRun(() -> {
-                                        record.setActive(false);
-                                        record.setUnbanStaffUuid(staff.getUniqueId());
-                                        record.setUnbanReason(reason);
-                                        record.setUnbannedAt(Instant.now());
-
-                                        // Remove from active mutes cache
-                                        activeMutes.remove(playerUuid);
-
-                                        PlayerUnpunishedEvent event = new PlayerUnpunishedEvent(staff, record, reason, false);
-                                        FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(event));
-
-                                        if (discord != null) {
-                                            discord.sendUnpunishment(record, staff.getName(), reason);
-                                        }
-                                    });
-                        }
-                        return CompletableFuture.completedFuture(null);
-                    });
-        }
-
-        return CompletableFuture.completedFuture(null);
-    }
-
-    /**
-     * Jails a player.
-     *
-     * @param staff The staff member issuing the jail
-     * @param victim The player to jail
-     * @param reason The jail reason
-     * @param duration The jail duration (null for permanent)
-     * @return CompletableFuture with the punishment record ID
-     */
-    public CompletableFuture<Integer> jailPlayer(Player staff, Player victim, String reason, Duration duration) {
-        return jailPlayer(staff, victim, reason, duration, null);
-    }
-
-    /**
-     * Jails a player into a specific Essentials cell.
-     *
-     * @param staff    The staff member issuing the jail
-     * @param victim   The player to jail
-     * @param reason   The jail reason
-     * @param duration The jail duration (null for permanent)
-     * @param cellName The Essentials cell to use, or null for the configured default
-     * @return CompletableFuture with the punishment record ID
-     */
-    public CompletableFuture<Integer> jailPlayer(Player staff, Player victim, String reason, Duration duration, String cellName) {
-        plugin.getSLF4JLogger().debug("Jailing {} (staff: {}, reason: {}, duration: {}, cell: {})",
-            victim.getName(), staff.getName(), reason, duration, cellName);
-
-        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, PunishmentType.JAIL, reason, duration);
-        Bukkit.getPluginManager().callEvent(event);
-
-        if (event.isCancelled()) {
-            plugin.getSLF4JLogger().debug("Jail of {} was cancelled by another plugin", victim.getName());
-            return CompletableFuture.completedFuture(-1);
-        }
-
-        String finalReason = event.getReason();
-        Duration finalDuration = event.getDuration();
-        Instant expiresAt = finalDuration != null ? Instant.now().plus(finalDuration) : null;
-
-        // Actually jail the player (pass duration so timed jails auto-release even without a DB,
-        // and the requested Essentials cell)
-        boolean jailed = plugin.getJailManager().jailPlayer(victim, finalDuration, cellName);
-        if (!jailed) {
-            plugin.getSLF4JLogger().warn("Failed to jail {} - jail location not set!", victim.getName());
-        }
-
-        // Create punishment record
-        PunishmentRecord record = new PunishmentRecord(
-                victim.getUniqueId(),
-                victim.getName(),
-                null,
-                staff.getUniqueId(),
-                staff.getName(),
-                PunishmentType.JAIL,
-                finalReason,
-                Instant.now(),
-                expiresAt
-        );
-        record.setServerName(serverName);
-
-        if (databaseEnabled && database != null) {
-            return database.savePunishment(record).thenApply(id -> {
-                record.setId(id);
-
-                PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-                FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
-
-                if (discord != null) {
-                    discord.sendPunishment(record);
-                }
-
-                return id;
-            });
-        } else {
-            // Database disabled, still send Discord notification and fire event
-            PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-            FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
-
-            if (discord != null) {
-                discord.sendPunishment(record);
-            }
-
-            return CompletableFuture.completedFuture(0);
-        }
-    }
-
-    /**
-     * Unjails a player.
-     *
-     * @param staff The staff member releasing the player
-     * @param playerName The player name to unjail
-     * @param reason The reason for unjailing
-     * @return CompletableFuture that completes when unjailing is done
-     */
-    public CompletableFuture<Void> unjailPlayer(Player staff, String playerName, String reason) {
-        UUID playerUuid = Bukkit.getOfflinePlayer(playerName).getUniqueId();
-
-        // Note: Caller is responsible for calling JailManager.releasePlayer() before this method.
-        // This method only handles the database record and events.
-
-        if (databaseEnabled && database != null) {
-            return database.getActivePunishmentsByType(playerUuid, PunishmentType.JAIL)
-                    .thenCompose(punishments -> {
-                        if (!punishments.isEmpty()) {
-                            PunishmentRecord record = punishments.get(0);
-                            return database.deactivatePunishment(record.getId(), staff.getUniqueId(), reason)
-                                    .thenRun(() -> {
-                                        record.setActive(false);
-                                        record.setUnbanStaffUuid(staff.getUniqueId());
-                                        record.setUnbanReason(reason);
-                                        record.setUnbannedAt(Instant.now());
-
-                                        PlayerUnpunishedEvent event = new PlayerUnpunishedEvent(staff, record, reason, false);
-                                        FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(event));
-
-                                        if (discord != null) {
-                                            discord.sendUnpunishment(record, staff.getName(), reason);
-                                        }
-                                    });
-                        }
-                        return CompletableFuture.completedFuture(null);
-                    });
-        }
-
-        return CompletableFuture.completedFuture(null);
-    }
-
-    /**
-     * Warns a player and auto-bans if threshold is reached.
-     *
-     * @param staff The staff member issuing the warning
-     * @param victim The player to warn
-     * @param reason The warning reason
-     * @return CompletableFuture with the punishment record ID
-     */
-    public CompletableFuture<Integer> warnPlayer(Player staff, Player victim, String reason) {
-        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, PunishmentType.WARNING, reason, null);
-        Bukkit.getPluginManager().callEvent(event);
-
-        if (event.isCancelled()) {
-            return CompletableFuture.completedFuture(-1);
-        }
-
-        String finalReason = event.getReason();
-
-        // Create punishment record
-        PunishmentRecord record = new PunishmentRecord(
-                victim.getUniqueId(),
-                victim.getName(),
-                null,
-                staff.getUniqueId(),
-                staff.getName(),
-                PunishmentType.WARNING,
-                finalReason,
-                Instant.now(),
-                null
-        );
-        record.setServerName(serverName);
-        record.setActive(false); // Warnings are not "active" in the traditional sense
-
-        if (databaseEnabled && database != null) {
-            return database.savePunishment(record).thenCompose(id -> {
-                record.setId(id);
-
-                PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-                FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
-
-                if (discord != null) {
-                    discord.sendPunishment(record);
-                }
-
-                // Check for auto-ban threshold (requires database)
-                return checkWarningThreshold(staff, victim).thenApply(v -> id);
-            });
-        } else {
-            // Database disabled, still send Discord notification and fire event
-            // Note: Auto-ban threshold won't work without database
-            PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victim.getName(), record);
-            FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
-
-            if (discord != null) {
-                discord.sendPunishment(record);
-            }
-
-            return CompletableFuture.completedFuture(0);
-        }
-    }
-
-    /**
-     * Checks if a player has reached the warning threshold and auto-bans them.
-     *
-     * @param staff The staff member who issued the warning
-     * @param victim The warned player
-     * @return CompletableFuture that completes when check is done
-     */
-    private CompletableFuture<Void> checkWarningThreshold(Player staff, Player victim) {
-        if (!plugin.getConfig().getBoolean("punishmentTypes.warnings.enabled", true)) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        int threshold = plugin.getConfig().getInt("punishmentTypes.warnings.autoBanThreshold", 3);
-        String autoBanDuration = plugin.getConfig().getString("punishmentTypes.warnings.autoBanDuration", "7d");
-
-        // Use optimized COUNT query instead of loading all records
-        return database.getWarningCount(victim.getUniqueId()).thenAccept(warningCount -> {
-            if (warningCount >= threshold) {
-                // Auto-ban - must run on main thread because banPlayer uses Bukkit API
-                Duration duration = parseDuration(autoBanDuration);
-                String reason = "Automatischer Ban: " + warningCount + " Verwarnungen erreicht";
-
-                FoliaScheduler.runGlobal(plugin, () -> {
-                    banPlayer(staff, victim, reason, duration, false).thenAccept(banId -> {
-                        plugin.getSLF4JLogger().info("Player {} auto-banned after {} warnings", victim.getName(), warningCount);
-                    });
-                });
-            }
         });
     }
 
     /**
-     * Parses a duration string (e.g., "7d", "1h30m", "PT24H").
-     * Uses the shared DurationParser utility.
-     *
-     * @param durationStr The duration string
-     * @return The parsed Duration, or null if permanent/invalid
+     * Lifts the IP ban belonging to a record, when that is possible at all.
      */
-    private Duration parseDuration(String durationStr) {
-        Duration duration = DurationParser.parse(durationStr);
-        if (duration == null && durationStr != null && !durationStr.trim().isEmpty()) {
-            if (!durationStr.equalsIgnoreCase("permanent") && !durationStr.equalsIgnoreCase("perm")) {
-                plugin.getSLF4JLogger().warn("Could not parse duration: '{}'. Use format like '7d', '1h30m', or 'permanent'", durationStr);
-            }
+    private void pardonIpIfPossible(PunishmentRecord record) {
+        if (record.getType() != PunishmentType.IP_BAN || record.getVictimIp() == null) {
+            return;
         }
-        return duration;
+
+        // The stored value is only the real address when anonymization is off; otherwise it
+        // is masked or hashed and there is nothing to hand to pardon().
+        if (plugin.settings().privacy().anonymizationLevel() == IPAnonymizer.AnonymizationLevel.NONE
+                && IPAnonymizer.isLiteralIp(record.getVictimIp())) {
+            FoliaScheduler.runGlobal(plugin, () -> BanLists.pardonIp(record.getVictimIp()));
+        } else {
+            plugin.getSLF4JLogger().warn("The IP ban for {} cannot be lifted automatically because the stored "
+                    + "address is anonymized ({}). Use /pardon-ip manually.",
+                    record.getVictimName(), plugin.settings().privacy().anonymizationLevel());
+        }
+    }
+
+    // ==================== Mutes ====================
+
+    /**
+     * Mutes a player permanently or temporarily.
+     */
+    public CompletableFuture<PunishmentResult> mutePlayer(CommandSender staff, Player victim, String reason,
+                                                          Duration duration) {
+        if (!canPunish(staff, victim)) {
+            return CompletableFuture.completedFuture(PunishmentResult.notPermitted());
+        }
+
+        PunishmentType requestedType = duration == null ? PunishmentType.MUTE : PunishmentType.TEMP_MUTE;
+        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, requestedType, reason, duration);
+        Bukkit.getPluginManager().callEvent(event);
+        if (event.isCancelled()) {
+            return CompletableFuture.completedFuture(PunishmentResult.cancelled());
+        }
+
+        String finalReason = event.getReason();
+        Duration finalDuration = event.getDuration();
+        Instant expiresAt = finalDuration != null ? Instant.now().plus(finalDuration) : null;
+        PunishmentType type = finalDuration == null ? PunishmentType.MUTE : PunishmentType.TEMP_MUTE;
+
+        PunishmentRecord record = newRecord(staff, victim, type, finalReason, expiresAt);
+
+        // Cache immediately: waiting for the database round-trip leaves a window in which the
+        // player is officially muted but can still talk.
+        activeMutes.put(victim.getUniqueId(), record);
+
+        return supersede(victim.getUniqueId(), MUTE_TYPES, staff, "Replaced by a new mute")
+                .thenCompose(ignored -> persistAndAnnounce(staff, victim.getName(), record));
     }
 
     /**
-     * Checks if a player is currently muted (synchronous cache check).
-     * Thread-safe implementation using computeIfPresent to avoid race conditions.
+     * Removes a mute.
      *
-     * @param playerUuid The player's UUID
-     * @return The active mute record, or null if not muted
+     * @return true if an active mute was found and lifted
+     */
+    public CompletableFuture<Boolean> unmutePlayer(CommandSender staff, String playerName, String reason) {
+        UUID playerUuid = resolvePlayerUuid(playerName);
+        if (playerUuid == null) {
+            return CompletableFuture.completedFuture(false);
+        }
+
+        // Always clear the cache, database or not. Without this a server running without a
+        // database could mute a player but never unmute them again.
+        boolean wasCached = activeMutes.remove(playerUuid) != null;
+
+        Database current = database;
+        if (current == null) {
+            return CompletableFuture.completedFuture(wasCached);
+        }
+
+        return current.getActivePunishments(playerUuid).thenCompose(active -> {
+            PunishmentRecord record = active.stream()
+                    .filter(p -> MUTE_TYPES.contains(p.getType()))
+                    .findFirst()
+                    .orElse(null);
+
+            if (record == null) {
+                return CompletableFuture.completedFuture(wasCached);
+            }
+
+            return current.deactivateActivePunishments(playerUuid, MUTE_TYPES, staffUuid(staff), reason)
+                    .thenApply(count -> {
+                        if (count > 0) {
+                            announceRemoval(staff, record, reason);
+                        }
+                        return count > 0 || wasCached;
+                    });
+        });
+    }
+
+    /**
+     * Checks whether a player is currently muted, without touching the database.
+     *
+     * @return the active mute record, or {@code null} if not muted
      */
     public PunishmentRecord getActiveMute(UUID playerUuid) {
-        // Use computeIfPresent for atomic check-and-remove operation
         return activeMutes.computeIfPresent(playerUuid, (uuid, record) -> {
-            // Check if expired
             if (record.getExpiresAt() != null && record.getExpiresAt().isBefore(Instant.now())) {
-                // Return null to atomically remove from map
-                return null;
+                return null; // Atomically drops the expired entry.
             }
-            // Return record to keep it in map
             return record;
         });
     }
 
     /**
-     * Loads all active mutes into cache from database.
-     * Should be called on plugin startup.
+     * Loads all active mutes into the cache. Called once the database is ready.
      */
     public void loadActiveMutes() {
-        if (!databaseEnabled || database == null) {
+        Database current = database;
+        if (current == null) {
             return;
         }
 
-        // Load permanent mutes
-        database.getActivePunishmentsByTypeGlobal(PunishmentType.MUTE)
-            .thenAccept(mutes -> {
-                for (PunishmentRecord mute : mutes) {
-                    activeMutes.put(mute.getVictimUuid(), mute);
-                }
-                plugin.getSLF4JLogger().info("Loaded {} active permanent mute(s)", mutes.size());
-            })
-            .exceptionally(throwable -> {
-                plugin.getSLF4JLogger().error("Failed to load permanent mutes", throwable);
-                return null;
-            });
-
-        // Load temporary mutes (only those not yet expired)
-        database.getActivePunishmentsByTypeGlobal(PunishmentType.TEMP_MUTE)
-            .thenAccept(tempMutes -> {
-                int loaded = 0;
-                for (PunishmentRecord mute : tempMutes) {
-                    // Double-check expiration (in case DB query doesn't filter)
-                    if (mute.getExpiresAt() == null || mute.getExpiresAt().isAfter(java.time.Instant.now())) {
-                        activeMutes.put(mute.getVictimUuid(), mute);
-                        loaded++;
+        current.getActivePunishmentsByTypesGlobal(MUTE_TYPES)
+                .thenAccept(mutes -> {
+                    Instant now = Instant.now();
+                    int loaded = 0;
+                    for (PunishmentRecord mute : mutes) {
+                        if (mute.getExpiresAt() == null || mute.getExpiresAt().isAfter(now)) {
+                            activeMutes.put(mute.getVictimUuid(), mute);
+                            loaded++;
+                        }
                     }
-                }
-                plugin.getSLF4JLogger().info("Loaded {} active temporary mute(s)", loaded);
-            })
-            .exceptionally(throwable -> {
-                plugin.getSLF4JLogger().error("Failed to load temporary mutes", throwable);
-                return null;
-            });
+                    plugin.getSLF4JLogger().info("Loaded {} active mute(s)", loaded);
+                })
+                .exceptionally(throwable -> {
+                    plugin.getSLF4JLogger().error("Failed to load active mutes", throwable);
+                    return null;
+                });
     }
 
     /**
-     * Removes a mute from the cache (called by UnbanScheduler on expiration).
-     *
-     * @param playerUuid The player UUID
+     * Removes a mute from the cache (called by the unban scheduler on expiry).
      */
     public void removeMuteFromCache(UUID playerUuid) {
         activeMutes.remove(playerUuid);
     }
 
     /**
-     * Resolves a player name to UUID without using the deprecated getOfflinePlayer(String).
-     * Checks online players first, then falls back to server player profiles.
+     * Drops every cached mute (called when the database is swapped out on reload).
      */
-    @SuppressWarnings("deprecation")
-    private UUID resolvePlayerUuid(String playerName) {
-        // Check online players first (fast path)
+    public void clearMuteCache() {
+        activeMutes.clear();
+    }
+
+    // ==================== Jail ====================
+
+    /**
+     * Jails a player.
+     */
+    public CompletableFuture<PunishmentResult> jailPlayer(CommandSender staff, Player victim, String reason,
+                                                          Duration duration) {
+        return jailPlayer(staff, victim, reason, duration, null);
+    }
+
+    /**
+     * Jails a player into a specific Essentials cell.
+     *
+     * @param cellName the Essentials cell to use, or {@code null} for the configured default
+     */
+    public CompletableFuture<PunishmentResult> jailPlayer(CommandSender staff, Player victim, String reason,
+                                                          Duration duration, String cellName) {
+        if (!canPunish(staff, victim)) {
+            return CompletableFuture.completedFuture(PunishmentResult.notPermitted());
+        }
+
+        if (!plugin.settings().jail().enabled()) {
+            plugin.getSLF4JLogger().warn("Refusing to jail {}: the jail system is disabled in config",
+                    victim.getName());
+            return CompletableFuture.completedFuture(PunishmentResult.failed());
+        }
+
+        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, PunishmentType.JAIL, reason, duration);
+        Bukkit.getPluginManager().callEvent(event);
+        if (event.isCancelled()) {
+            return CompletableFuture.completedFuture(PunishmentResult.cancelled());
+        }
+
+        String finalReason = event.getReason();
+        Duration finalDuration = event.getDuration();
+        Instant expiresAt = finalDuration != null ? Instant.now().plus(finalDuration) : null;
+
+        // Apply the jail first and abort if it fails. Storing an active JAIL record for a
+        // player who is still walking around free would leave the database lying, and the
+        // staff member would have been told the jail succeeded.
+        if (!plugin.getJailManager().jailPlayer(victim, finalDuration, cellName)) {
+            plugin.getSLF4JLogger().warn("Failed to jail {} - no jail location configured, or the "
+                    + "Essentials integration rejected the request", victim.getName());
+            return CompletableFuture.completedFuture(PunishmentResult.failed());
+        }
+
+        PunishmentRecord record = newRecord(staff, victim, PunishmentType.JAIL, finalReason, expiresAt);
+
+        return supersede(victim.getUniqueId(), List.of(PunishmentType.JAIL), staff, "Replaced by a new jail")
+                .thenCompose(ignored -> persistAndAnnounce(staff, victim.getName(), record));
+    }
+
+    /**
+     * Removes a jail record.
+     *
+     * <p>The caller is responsible for calling {@code JailManager.releasePlayer} first;
+     * this method only reconciles the database and fires the event.
+     *
+     * @return true if an active jail record was found and lifted
+     */
+    public CompletableFuture<Boolean> unjailPlayer(CommandSender staff, String playerName, String reason) {
+        UUID playerUuid = resolvePlayerUuid(playerName);
+        Database current = database;
+        if (current == null || playerUuid == null) {
+            return CompletableFuture.completedFuture(false);
+        }
+
+        return current.getActivePunishmentsByType(playerUuid, PunishmentType.JAIL)
+                .thenCompose(punishments -> {
+                    if (punishments.isEmpty()) {
+                        return CompletableFuture.completedFuture(false);
+                    }
+                    PunishmentRecord record = punishments.get(0);
+                    return current.deactivateActivePunishments(playerUuid, List.of(PunishmentType.JAIL),
+                                    staffUuid(staff), reason)
+                            .thenApply(count -> {
+                                if (count > 0) {
+                                    announceRemoval(staff, record, reason);
+                                }
+                                return count > 0;
+                            });
+                });
+    }
+
+    // ==================== Warnings ====================
+
+    /**
+     * Warns a player and auto-bans once the threshold is reached.
+     */
+    public CompletableFuture<PunishmentResult> warnPlayer(CommandSender staff, Player victim, String reason) {
+        if (!canPunish(staff, victim)) {
+            return CompletableFuture.completedFuture(PunishmentResult.notPermitted());
+        }
+
+        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, PunishmentType.WARNING, reason, null);
+        Bukkit.getPluginManager().callEvent(event);
+        if (event.isCancelled()) {
+            return CompletableFuture.completedFuture(PunishmentResult.cancelled());
+        }
+
+        PunishmentRecord record = newRecord(staff, victim, PunishmentType.WARNING, event.getReason(), null);
+
+        return persistAndAnnounce(staff, victim.getName(), record)
+                .thenCompose(result -> {
+                    if (!result.isSuccess() || database == null) {
+                        return CompletableFuture.completedFuture(result);
+                    }
+                    return checkWarningThreshold(staff, victim).thenApply(ignored -> result);
+                });
+    }
+
+    /**
+     * Counts a player's warnings that still count towards the auto-ban threshold.
+     */
+    public CompletableFuture<Integer> getWarningCount(UUID playerUuid) {
+        Database current = database;
+        if (current == null) {
+            return CompletableFuture.completedFuture(0);
+        }
+        Duration expiry = plugin.settings().warnings().expiry();
+        return current.getWarningCount(playerUuid, expiry == null ? null : Instant.now().minus(expiry));
+    }
+
+    /**
+     * Auto-bans a player once they reach the configured number of warnings.
+     *
+     * <p>The counted warnings are deactivated afterwards. Without that reset the count only
+     * ever grows, so every single warning past the threshold triggered another ban.
+     */
+    private CompletableFuture<Void> checkWarningThreshold(CommandSender staff, Player victim) {
+        Settings.Warnings warnings = plugin.settings().warnings();
+        if (!warnings.enabled()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        Database current = database;
+        if (current == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        return getWarningCount(victim.getUniqueId()).thenCompose(count -> {
+            if (count < warnings.autoBanThreshold()) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            Duration duration = parseDuration(warnings.autoBanDuration());
+            String reason = "Automatic ban: reached " + count + " warnings";
+
+            // Consume the warnings first, so a failure to ban does not leave the player
+            // primed to be banned again by their next warning.
+            return current.deactivateActivePunishments(victim.getUniqueId(), List.of(PunishmentType.WARNING),
+                            staffUuid(staff), "Consumed by automatic ban")
+                    .thenAccept(ignored -> FoliaScheduler.runGlobal(plugin, () -> {
+                        if (!victim.isOnline()) {
+                            plugin.getSLF4JLogger().info("Skipping auto-ban of {}: player went offline",
+                                    victim.getName());
+                            return;
+                        }
+                        banPlayer(staff, victim, reason, duration, false).thenAccept(result ->
+                                plugin.getSLF4JLogger().info("Player {} auto-banned after {} warnings ({})",
+                                        victim.getName(), count, result.status()));
+                    }));
+        });
+    }
+
+    // ==================== Queries ====================
+
+    /**
+     * Gets punishment history for a player.
+     */
+    public CompletableFuture<List<PunishmentRecord>> getHistory(UUID playerUuid, int limit) {
+        Database current = database;
+        return current == null
+                ? CompletableFuture.completedFuture(List.of())
+                : current.getPunishmentsByPlayer(playerUuid, limit);
+    }
+
+    /**
+     * Gets active punishments for a player.
+     */
+    public CompletableFuture<List<PunishmentRecord>> getActivePunishments(UUID playerUuid) {
+        Database current = database;
+        return current == null
+                ? CompletableFuture.completedFuture(List.of())
+                : current.getActivePunishments(playerUuid);
+    }
+
+    // ==================== Internals ====================
+
+    private PunishmentRecord newRecord(CommandSender staff, Player victim, PunishmentType type,
+                                       String reason, Instant expiresAt) {
+        PunishmentRecord record = new PunishmentRecord(
+                victim.getUniqueId(),
+                victim.getName(),
+                null,
+                staffUuid(staff),
+                staffName(staff),
+                type,
+                reason,
+                Instant.now(),
+                expiresAt);
+        record.setServerName(plugin.settings().serverName());
+        if (type == PunishmentType.WARNING) {
+            // Warnings stay active until they are consumed by an auto-ban or expire.
+            record.setActive(true);
+        }
+        return record;
+    }
+
+    /**
+     * Deactivates punishments of the given types that are still marked active, so a player
+     * never accumulates several active mutes or jails that have to be lifted one by one.
+     */
+    private CompletableFuture<Integer> supersede(UUID victimUuid, List<PunishmentType> types,
+                                                 CommandSender staff, String reason) {
+        Database current = database;
+        if (current == null) {
+            return CompletableFuture.completedFuture(0);
+        }
+        return current.deactivateActivePunishments(victimUuid, types, staffUuid(staff), reason)
+                .exceptionally(throwable -> {
+                    plugin.getSLF4JLogger().warn("Failed to supersede previous punishments: {}", throwable.toString());
+                    return 0;
+                });
+    }
+
+    /**
+     * Persists a record (when a database is configured), then fires the event, writes the
+     * audit log and notifies Discord.
+     */
+    private CompletableFuture<PunishmentResult> persistAndAnnounce(CommandSender staff, String victimName,
+                                                                   PunishmentRecord record) {
+        Database current = database;
+        if (current == null) {
+            announce(staff, victimName, record);
+            return CompletableFuture.completedFuture(PunishmentResult.success(0));
+        }
+
+        return current.savePunishment(record)
+                .thenApply(id -> {
+                    record.setId(id);
+                    announce(staff, victimName, record);
+                    return PunishmentResult.success(id);
+                })
+                .exceptionally(throwable -> {
+                    // The punishment is already in effect in-game; make very sure this is not
+                    // swallowed, because the record is now missing from the history.
+                    plugin.getSLF4JLogger().error("Punishment for {} was applied but could NOT be saved to the "
+                            + "database. It will not appear in the history.", victimName, throwable);
+                    announce(staff, victimName, record);
+                    return PunishmentResult.failed();
+                });
+    }
+
+    private void announce(CommandSender staff, String victimName, PunishmentRecord record) {
+        auditLog.logPunishment(record);
+
+        PlayerPunishedEvent punishedEvent = new PlayerPunishedEvent(staff, victimName, record);
+        FoliaScheduler.runGlobal(plugin, () -> Bukkit.getPluginManager().callEvent(punishedEvent));
+
+        DiscordWebhook webhook = discord;
+        if (webhook != null && isDiscordEnabledFor(record.getType())) {
+            webhook.sendPunishment(record);
+        }
+    }
+
+    private void announceRemoval(CommandSender staff, PunishmentRecord record, String reason) {
+        record.setActive(false);
+        record.setUnbanStaffUuid(staffUuid(staff));
+        record.setUnbanReason(reason);
+        record.setUnbannedAt(Instant.now());
+
+        auditLog.logRemoval(record, staffName(staff), reason);
+
+        FoliaScheduler.runGlobal(plugin, () ->
+                Bukkit.getPluginManager().callEvent(new PlayerUnpunishedEvent(staff, record, reason, false)));
+
+        DiscordWebhook webhook = discord;
+        if (webhook != null && plugin.settings().discord().unbans()) {
+            webhook.sendUnpunishment(record, staffName(staff), reason);
+        }
+    }
+
+    /**
+     * Honours the {@code discord.notifications.*} toggles, which were previously ignored for
+     * everything except appeals.
+     */
+    private boolean isDiscordEnabledFor(PunishmentType type) {
+        Settings.DiscordSettings settings = plugin.settings().discord();
+        return switch (type) {
+            case BAN, TEMP_BAN, IP_BAN -> settings.bans();
+            case KICK -> settings.kicks();
+            case MUTE, TEMP_MUTE -> settings.mutes();
+            case JAIL -> settings.jails();
+            case WARNING -> settings.warnings();
+            default -> true;
+        };
+    }
+
+    private static String rawAddress(Player player) {
+        var address = player.getAddress();
+        return address == null || address.getAddress() == null ? null : address.getAddress().getHostAddress();
+    }
+
+    private Duration parseDuration(String durationStr) {
+        DurationParser.Result result = DurationParser.parse(durationStr);
+        if (result.isInvalid()) {
+            // Never fall back to "permanent" here - a config typo must not silently turn an
+            // auto-ban into a permanent ban.
+            plugin.getSLF4JLogger().warn("Could not parse duration '{}' - falling back to 7d. "
+                    + "Use a format like '7d', '1h30m' or 'permanent'.", durationStr);
+            return Duration.ofDays(7);
+        }
+        return result.orNullForPermanent();
+    }
+
+    /**
+     * Resolves a player name to a UUID using only local knowledge.
+     *
+     * <p>Deliberately does not fall back to {@code Bukkit.getOfflinePlayer(String)}: that call
+     * may block on a web request and, worse, invents an offline-mode UUID for unknown names,
+     * which would silently address the wrong player's records.
+     *
+     * @return the UUID, or {@code null} if the name is unknown to this server
+     */
+    public UUID resolvePlayerUuid(String playerName) {
         Player online = Bukkit.getPlayerExact(playerName);
         if (online != null) {
             return online.getUniqueId();
         }
 
-        // Use cached offline player lookup
-        org.bukkit.OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(playerName);
-        if (cached != null) {
-            return cached.getUniqueId();
-        }
-
-        // Fallback to deprecated method (still works, just deprecated)
-        return Bukkit.getOfflinePlayer(playerName).getUniqueId();
+        OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(playerName);
+        return cached != null ? cached.getUniqueId() : null;
     }
 }

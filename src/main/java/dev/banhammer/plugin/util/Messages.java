@@ -7,12 +7,34 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 
+/**
+ * Loads and renders all user-facing messages.
+ *
+ * <h2>Placeholder safety</h2>
+ * Message templates are MiniMessage sources. Any value substituted into them
+ * ({@code {player}}, {@code {reason}}, {@code {text}}, ...) is escaped with
+ * {@link MiniMessage#escapeTags(String)} first, so player-supplied content such as an
+ * appeal text cannot inject {@code <click:run_command:...>} or {@code <hover:...>} tags
+ * into staff-facing output.
+ *
+ * <h2>Defaults</h2>
+ * The configuration loaded from disk is backed by the corresponding resource bundled in
+ * the plugin jar. Message keys added by a plugin update therefore resolve correctly on
+ * servers whose {@code messages_*.yml} predates them, instead of falling back to the
+ * hard-coded German strings.
+ */
 public final class Messages {
 
     private final BanHammerPlugin plugin;
-    private File file;
-    private FileConfiguration cfg;
+    private volatile FileConfiguration cfg = new YamlConfiguration();
     private final MiniMessage mm = MiniMessage.miniMessage();
 
     public Messages(BanHammerPlugin plugin) {
@@ -22,28 +44,33 @@ public final class Messages {
 
     public void load() {
         try {
-            // Get language from config
-            String lang = plugin.getConfig().getString("language", "de");
+            String lang = sanitizeLanguage(plugin.getConfig().getString("language", "en"));
             String fileName = "messages_" + lang + ".yml";
 
-            file = new File(plugin.getDataFolder(), fileName);
-
-            // If language-specific file doesn't exist, save it from resources
-            if (!file.exists()) {
-                try {
-                    plugin.saveResource(fileName, false);
-                } catch (IllegalArgumentException e) {
-                    // Language file not in resources, fall back to default
-                    plugin.getSLF4JLogger().warn("Language file {} not found, using messages.yml", fileName);
-                    fileName = "messages.yml";
-                    file = new File(plugin.getDataFolder(), fileName);
-                    if (!file.exists()) {
-                        plugin.saveResource(fileName, false);
-                    }
-                }
+            if (plugin.getResource(fileName) == null) {
+                plugin.getSLF4JLogger().warn("Language '{}' is not bundled with BanHammer, falling back to 'en'", lang);
+                lang = "en";
+                fileName = "messages_en.yml";
             }
 
-            cfg = YamlConfiguration.loadConfiguration(file);
+            File file = new File(plugin.getDataFolder(), fileName);
+            if (!file.exists()) {
+                plugin.saveResource(fileName, false);
+            }
+
+            FileConfiguration loaded = YamlConfiguration.loadConfiguration(file);
+            FileConfiguration bundled = loadBundled(fileName);
+
+            if (bundled != null) {
+                // Write keys added by a plugin update into the server's file, so an admin can
+                // see and translate them instead of silently getting the built-in default.
+                addMissingKeys(loaded, bundled, file);
+                // Still back the file with the bundle: covers anything that could not be
+                // written (read-only data folder) and keys removed by hand.
+                loaded.setDefaults(bundled);
+            }
+
+            cfg = loaded;
             plugin.getSLF4JLogger().info("Loaded language file: {}", fileName);
         } catch (Exception e) {
             plugin.getSLF4JLogger().error("Failed to load messages", e);
@@ -51,434 +78,566 @@ public final class Messages {
         }
     }
 
+    /**
+     * Reads the language file shipped inside the plugin jar.
+     */
+    private FileConfiguration loadBundled(String fileName) throws java.io.IOException {
+        try (InputStream in = plugin.getResource(fileName)) {
+            if (in == null) {
+                return null;
+            }
+            return YamlConfiguration.loadConfiguration(new InputStreamReader(in, StandardCharsets.UTF_8));
+        }
+    }
+
+    /**
+     * Copies keys that exist in the bundled file but not in the server's file, then saves.
+     *
+     * <p>Values the administrator already has are never touched - only genuinely absent keys
+     * are added. The file is backed up once before the first modification.
+     */
+    private void addMissingKeys(FileConfiguration loaded, FileConfiguration bundled, File file) {
+        List<String> added = new ArrayList<>();
+
+        for (String key : bundled.getKeys(true)) {
+            if (bundled.isConfigurationSection(key)) {
+                continue; // Sections appear implicitly once their leaves are set.
+            }
+            // ignoreDefault = true: ask what is really in the file, not what a default provides.
+            if (loaded.contains(key, true)) {
+                continue;
+            }
+            loaded.set(key, bundled.get(key));
+            added.add(key);
+        }
+
+        if (added.isEmpty()) {
+            return;
+        }
+
+        try {
+            File backup = new File(file.getParentFile(), file.getName() + ".backup");
+            if (!backup.exists()) {
+                Files.copy(file.toPath(), backup.toPath());
+            }
+            loaded.save(file);
+            plugin.getSLF4JLogger().info("Added {} new message key(s) to {}: {}",
+                    added.size(), file.getName(), String.join(", ", added));
+        } catch (Exception e) {
+            // Not fatal: the bundled defaults still back the configuration in memory.
+            plugin.getSLF4JLogger().warn("Could not write new message keys to {} ({}). "
+                    + "The built-in texts are used for them.", file.getName(), e.toString());
+        }
+    }
+
+    /**
+     * Restricts the configured language to a bare identifier so it cannot be used to
+     * point at an arbitrary path.
+     */
+    private static String sanitizeLanguage(String lang) {
+        if (lang == null || lang.isBlank()) {
+            return "en";
+        }
+        String cleaned = lang.trim().toLowerCase(Locale.ROOT);
+        return cleaned.matches("[a-z0-9_-]{1,16}") ? cleaned : "en";
+    }
+
+    /**
+     * Reads a raw template. Resolution order: server file, bundled resource, hard-coded default.
+     */
     private String raw(String path, String def) {
-        return cfg.getString(path, def);
+        String value = cfg.getString(path);
+        return value != null ? value : def;
+    }
+
+    /**
+     * Escapes a value so it is inserted as literal text rather than parsed as MiniMessage.
+     */
+    private String esc(String value) {
+        return mm.escapeTags(value == null ? "" : value);
+    }
+
+    /**
+     * Deserializes a template, degrading to plain text if an administrator wrote a
+     * malformed tag instead of aborting the whole command.
+     */
+    private Component render(String path, String template) {
+        try {
+            return mm.deserialize(template);
+        } catch (Exception e) {
+            plugin.getSLF4JLogger().warn("Message '{}' contains invalid MiniMessage and was rendered as plain text: {}",
+                    path, e.getMessage());
+            return Component.text(template);
+        }
+    }
+
+    /** Renders a template without placeholders. */
+    private Component msg(String path, String def) {
+        return render(path, raw(path, def));
+    }
+
+    /** Renders a template with a single escaped placeholder. */
+    private Component msg(String path, String def, String key, String value) {
+        return render(path, raw(path, def).replace(key, esc(value)));
+    }
+
+    // -------- Generic accessors --------
+
+    /**
+     * Looks up a label from the {@code gui:} section.
+     *
+     * <p>Menu labels are numerous and purely cosmetic, so they get one generic accessor
+     * instead of thirty near-identical methods. They live under their own prefix so they
+     * cannot collide with message keys.
+     *
+     * @param key the key below {@code gui:}
+     * @param def the fallback text
+     */
+    public Component gui(String key, String def) {
+        return msg("gui." + key, def);
+    }
+
+    /**
+     * Looks up a GUI label with one escaped placeholder.
+     */
+    public Component gui(String key, String def, String placeholder, String value) {
+        return msg("gui." + key, def, placeholder, value);
+    }
+
+    /**
+     * Looks up a plain (non-MiniMessage) string, for text that leaves Minecraft - Discord
+     * embed titles in particular, where formatting tags would be shown literally.
+     *
+     * @param key the key below {@code discord:}
+     * @param def the fallback text
+     */
+    public String discordText(String key, String def) {
+        return raw("discord." + key, def);
     }
 
     // -------- Components --------
 
     public Component prefix() {
-        return mm.deserialize(raw("prefix", "<gold>[BanHammer]</gold> "));
+        return msg("prefix", "<gold>[BanHammer]</gold> ");
     }
 
     public Component noPermission() {
-        return mm.deserialize(raw("noPermission", "<red>Du hast keine Berechtigung.</red>"));
+        return msg("noPermission", "<red>Du hast keine Berechtigung.</red>");
     }
 
     public Component reloaded() {
-        return mm.deserialize(raw("reloaded", "<green>Konfiguration neu geladen.</green>"));
+        return msg("reloaded", "<green>Konfiguration neu geladen.</green>");
     }
 
     public Component notPlayer() {
-        return mm.deserialize(raw("notPlayer", "<red>Nur im Spiel verfügbar.</red>"));
+        return msg("notPlayer", "<red>Nur im Spiel verfügbar.</red>");
     }
 
     public Component noTarget() {
-        return mm.deserialize(raw("noTarget", "<yellow>Kein Spieler im Visier!</yellow>"));
+        return msg("noTarget", "<yellow>Kein Spieler im Visier!</yellow>");
     }
 
     public Component cannotBan() {
-        return mm.deserialize(raw("cannotBan", "<red>Du kannst diesen Spieler nicht bannen.</red>"));
+        return msg("cannotBan", "<red>Du kannst diesen Spieler nicht bannen.</red>");
     }
 
     public Component given(String player) {
-        String base = raw("given", "<green>Ban Hammer an {player} gegeben.</green>");
-        return mm.deserialize(base.replace("{player}", player));
+        return msg("given", "<green>Ban Hammer an {player} gegeben.</green>", "{player}", player);
     }
 
     public Component cooldown(int seconds) {
-        String base = raw("cooldown", "<yellow>Warte noch {seconds}s.</yellow>");
-        return mm.deserialize(base.replace("{seconds}", String.valueOf(seconds)));
+        return msg("cooldown", "<yellow>Warte noch {seconds}s.</yellow>", "{seconds}", String.valueOf(seconds));
     }
 
     public Component bannedBroadcast(String staff, String victim, String durationText) {
         String base = raw("bannedBroadcast", "<gold>{staff}</gold> hat <red>{victim}</red>{duration} gebannt.");
-        return mm.deserialize(
-                base.replace("{staff}", staff)
-                        .replace("{victim}", victim)
-                        .replace("{duration}", durationText)
-        );
+        return render("bannedBroadcast", base
+                .replace("{staff}", esc(staff))
+                .replace("{victim}", esc(victim))
+                .replace("{duration}", esc(durationText)));
     }
 
     public Component bannedStaff(String victim, String durationText) {
         String base = raw("bannedStaff", "<green>{victim}</green> gebannt{duration}.");
-        return mm.deserialize(
-                base.replace("{victim}", victim)
-                        .replace("{duration}", durationText)
-        );
+        return render("bannedStaff", base
+                .replace("{victim}", esc(victim))
+                .replace("{duration}", esc(durationText)));
     }
 
     public Component tempBannedBroadcast(String staff, String victim, String duration) {
         String base = raw("tempBannedBroadcast", "<gold>{staff}</gold> hat <red>{victim}</red> für {duration} gebannt.");
-        return mm.deserialize(
-                base.replace("{staff}", staff)
-                        .replace("{victim}", victim)
-                        .replace("{duration}", duration)
-        );
+        return render("tempBannedBroadcast", base
+                .replace("{staff}", esc(staff))
+                .replace("{victim}", esc(victim))
+                .replace("{duration}", esc(duration)));
     }
 
     public Component tempBannedStaff(String victim, String duration) {
         String base = raw("tempBannedStaff", "<green>{victim}</green> für {duration} gebannt.");
-        return mm.deserialize(
-                base.replace("{victim}", victim)
-                        .replace("{duration}", duration)
-        );
+        return render("tempBannedStaff", base
+                .replace("{victim}", esc(victim))
+                .replace("{duration}", esc(duration)));
     }
 
     public Component kickedStaff(String victim) {
-        String base = raw("kickedStaff", "<green>{victim}</green> gekickt.");
-        return mm.deserialize(base.replace("{victim}", victim));
+        return msg("kickedStaff", "<green>{victim}</green> gekickt.", "{victim}", victim);
     }
 
     // -------- New 3.0 Messages --------
 
     public Component databaseDisabled() {
-        return mm.deserialize(raw("databaseDisabled", "<red>Datenbank ist nicht aktiviert.</red>"));
+        return msg("databaseDisabled", "<red>Datenbank ist nicht aktiviert.</red>");
     }
 
     public Component playerNotFound() {
-        return mm.deserialize(raw("playerNotFound", "<red>Spieler nicht gefunden.</red>"));
+        return msg("playerNotFound", "<red>Spieler nicht gefunden.</red>");
     }
 
     public Component unbanned(String player) {
-        String base = raw("unbanned", "<green>{player} wurde entbannt.</green>");
-        return mm.deserialize(base.replace("{player}", player));
+        return msg("unbanned", "<green>{player} wurde entbannt.</green>", "{player}", player);
     }
 
     public Component unbanReason(String reason) {
-        String base = raw("unbanReason", "<gray>Grund: {reason}</gray>");
-        return mm.deserialize(base.replace("{reason}", reason));
+        return msg("unbanReason", "<gray>Grund: {reason}</gray>", "{reason}", reason);
     }
 
     public Component notBanned(String player) {
-        String base = raw("notBanned", "<yellow>{player} ist nicht gebannt.</yellow>");
-        return mm.deserialize(base.replace("{player}", player));
+        return msg("notBanned", "<yellow>{player} ist nicht gebannt.</yellow>", "{player}", player);
     }
 
     // History
     public Component historyHeader(String player, int page, int maxPages) {
         String base = raw("historyHeader", "<gold>--- Ban-Historie von {player} (Seite {page}/{maxPages}) ---</gold>");
-        return mm.deserialize(base
-                .replace("{player}", player)
+        return render("historyHeader", base
+                .replace("{player}", esc(player))
                 .replace("{page}", String.valueOf(page))
                 .replace("{maxPages}", String.valueOf(maxPages)));
     }
 
     public Component historyEntry(int id, String type, String reason) {
         String base = raw("historyEntry", "<gray>#{id}</gray> <yellow>{type}</yellow> - <white>{reason}</white>");
-        return mm.deserialize(base
+        return render("historyEntry", base
                 .replace("{id}", String.valueOf(id))
-                .replace("{type}", type)
-                .replace("{reason}", reason));
+                .replace("{type}", esc(type))
+                .replace("{reason}", esc(reason)));
     }
 
     public Component historyEntryDate(String date) {
-        String base = raw("historyEntryDate", "  <gray>Datum: {date}</gray>");
-        return mm.deserialize(base.replace("{date}", date));
+        return msg("historyEntryDate", "  <gray>Datum: {date}</gray>", "{date}", date);
     }
 
     public Component historyEntryStaff(String staff) {
-        String base = raw("historyEntryStaff", "  <gray>Staff: {staff}</gray>");
-        return mm.deserialize(base.replace("{staff}", staff));
+        return msg("historyEntryStaff", "  <gray>Staff: {staff}</gray>", "{staff}", staff);
     }
 
     public Component historyEntryExpires(String expires) {
-        String base = raw("historyEntryExpires", "  <gray>Läuft ab: {expires}</gray>");
-        return mm.deserialize(base.replace("{expires}", expires));
+        return msg("historyEntryExpires", "  <gray>Läuft ab: {expires}</gray>", "{expires}", expires);
     }
 
     public Component historyEntryActive() {
-        return mm.deserialize(raw("historyEntryActive", "  <red>[AKTIV]</red>"));
+        return msg("historyEntryActive", "  <red>[AKTIV]</red>");
     }
 
     public Component historyEmpty() {
-        return mm.deserialize(raw("historyEmpty", "<yellow>Keine Einträge gefunden.</yellow>"));
+        return msg("historyEmpty", "<yellow>Keine Einträge gefunden.</yellow>");
     }
 
     public Component historyInvalidPage() {
-        return mm.deserialize(raw("historyInvalidPage", "<red>Ungültige Seitennummer.</red>"));
+        return msg("historyInvalidPage", "<red>Ungültige Seitennummer.</red>");
     }
 
     // Stats
     public Component statsHeader(String target) {
-        String base = raw("statsHeader", "<gold>--- Statistiken {target} ---</gold>");
-        return mm.deserialize(base.replace("{target}", target));
+        return msg("statsHeader", "<gold>--- Statistiken {target} ---</gold>", "{target}", target);
     }
 
     public Component statsTotal(int total) {
-        String base = raw("statsTotal", "<gray>Gesamt:</gray> <white>{total} Bestrafungen</white>");
-        return mm.deserialize(base.replace("{total}", String.valueOf(total)));
+        return msg("statsTotal", "<gray>Gesamt:</gray> <white>{total} Bestrafungen</white>", "{total}", String.valueOf(total));
     }
 
     public Component statsBans(int bans) {
-        String base = raw("statsBans", "<gray>Bans:</gray> <white>{bans}</white>");
-        return mm.deserialize(base.replace("{bans}", String.valueOf(bans)));
+        return msg("statsBans", "<gray>Bans:</gray> <white>{bans}</white>", "{bans}", String.valueOf(bans));
     }
 
     public Component statsKicks(int kicks) {
-        String base = raw("statsKicks", "<gray>Kicks:</gray> <white>{kicks}</white>");
-        return mm.deserialize(base.replace("{kicks}", String.valueOf(kicks)));
+        return msg("statsKicks", "<gray>Kicks:</gray> <white>{kicks}</white>", "{kicks}", String.valueOf(kicks));
     }
 
     public Component statsMutes(int mutes) {
-        String base = raw("statsMutes", "<gray>Mutes:</gray> <white>{mutes}</white>");
-        return mm.deserialize(base.replace("{mutes}", String.valueOf(mutes)));
+        return msg("statsMutes", "<gray>Mutes:</gray> <white>{mutes}</white>", "{mutes}", String.valueOf(mutes));
     }
 
     public Component statsWarnings(int warnings) {
-        String base = raw("statsWarnings", "<gray>Warnungen:</gray> <white>{warnings}</white>");
-        return mm.deserialize(base.replace("{warnings}", String.valueOf(warnings)));
+        return msg("statsWarnings", "<gray>Warnungen:</gray> <white>{warnings}</white>", "{warnings}", String.valueOf(warnings));
+    }
+
+    public Component statsJails(int jails) {
+        return msg("statsJails", "<gray>Jails:</gray> <white>{jails}</white>", "{jails}", String.valueOf(jails));
     }
 
     // Appeals
     public Component appealSubmitted() {
-        return mm.deserialize(raw("appealSubmitted", "<green>Dein Appeal wurde eingereicht.</green>"));
+        return msg("appealSubmitted", "<green>Dein Appeal wurde eingereicht.</green>");
     }
 
     public Component appealCooldown(long hours) {
-        String base = raw("appealCooldown", "<red>Du musst noch {hours} Stunden warten.</red>");
-        return mm.deserialize(base.replace("{hours}", String.valueOf(hours)));
+        return msg("appealCooldown", "<red>Du musst noch {hours} Stunden warten.</red>", "{hours}", String.valueOf(hours));
     }
 
     public Component appealNoActiveBan() {
-        return mm.deserialize(raw("appealNoActiveBan", "<red>Du hast keinen aktiven Ban.</red>"));
+        return msg("appealNoActiveBan", "<red>Du hast keine aktive Bestrafung, gegen die du Einspruch einlegen kannst.</red>");
     }
 
     public Component appealTooShort() {
-        return mm.deserialize(raw("appealTooShort", "<red>Der Appeal-Text muss mindestens 20 Zeichen lang sein.</red>"));
+        return msg("appealTooShort", "<red>Der Appeal-Text muss mindestens 20 Zeichen lang sein.</red>");
     }
 
     public Component appealMaxReached() {
-        return mm.deserialize(raw("appealMaxReached", "<red>Du hast bereits die maximale Anzahl an Appeals erreicht.</red>"));
+        return msg("appealMaxReached", "<red>Du hast bereits die maximale Anzahl an Appeals erreicht.</red>");
     }
 
     public Component appealsHeader(int count) {
-        String base = raw("appealsHeader", "<gold>--- Offene Appeals ({count}) ---</gold>");
-        return mm.deserialize(base.replace("{count}", String.valueOf(count)));
+        return msg("appealsHeader", "<gold>--- Offene Appeals ({count}) ---</gold>", "{count}", String.valueOf(count));
     }
 
     public Component appealsEntry(int id, String player, String text) {
         String base = raw("appealsEntry", "<gray>#{id}</gray> <yellow>{player}</yellow> - {text}");
-        return mm.deserialize(base
+        return render("appealsEntry", base
                 .replace("{id}", String.valueOf(id))
-                .replace("{player}", player)
-                .replace("{text}", text));
+                .replace("{player}", esc(player))
+                .replace("{text}", esc(text)));
     }
 
     public Component appealsEntryDate(String date) {
-        String base = raw("appealsEntryDate", "  <gray>{date}</gray>");
-        return mm.deserialize(base.replace("{date}", date));
+        return msg("appealsEntryDate", "  <gray>{date}</gray>", "{date}", date);
     }
 
     public Component appealsEmpty() {
-        return mm.deserialize(raw("appealsEmpty", "<yellow>Keine offenen Appeals.</yellow>"));
+        return msg("appealsEmpty", "<yellow>Keine offenen Appeals.</yellow>");
     }
 
     public Component appealsInvalidId() {
-        return mm.deserialize(raw("appealsInvalidId", "<red>Ungültige Appeal-ID.</red>"));
+        return msg("appealsInvalidId", "<red>Ungültige Appeal-ID.</red>");
     }
 
     public Component appealApproved(int id) {
-        String base = raw("appealApproved", "<green>Appeal #{id} wurde genehmigt.</green>");
-        return mm.deserialize(base.replace("{id}", String.valueOf(id)));
+        return msg("appealApproved", "<green>Appeal #{id} wurde genehmigt.</green>", "{id}", String.valueOf(id));
     }
 
     public Component appealDenied(int id) {
-        String base = raw("appealDenied", "<red>Appeal #{id} wurde abgelehnt.</red>");
-        return mm.deserialize(base.replace("{id}", String.valueOf(id)));
+        return msg("appealDenied", "<red>Appeal #{id} wurde abgelehnt.</red>", "{id}", String.valueOf(id));
     }
 
     public Component appealNotification(String status) {
-        String base = raw("appealNotification", "<green>Dein Appeal wurde bearbeitet: {status}</green>");
-        return mm.deserialize(base.replace("{status}", status));
+        return msg("appealNotification", "<green>Dein Appeal wurde bearbeitet: {status}</green>", "{status}", status);
     }
 
     public Component appealResponse(String response) {
-        String base = raw("appealResponse", "<gray>Antwort: {response}</gray>");
-        return mm.deserialize(base.replace("{response}", response));
+        return msg("appealResponse", "<gray>Antwort: {response}</gray>", "{response}", response);
     }
 
     // Errors
     public Component errorOccurred() {
-        return mm.deserialize(raw("errorOccurred", "<red>Ein Fehler ist aufgetreten.</red>"));
+        return msg("errorOccurred", "<red>Ein Fehler ist aufgetreten.</red>");
     }
 
     public Component invalidDuration() {
-        return mm.deserialize(raw("invalidDuration", "<red>Ungültige Dauer. Beispiele: 7d, 1h30m, permanent</red>"));
+        return msg("invalidDuration", "<red>Ungültige Dauer. Beispiele: 7d, 1h30m, 2w, permanent</red>");
     }
 
     // Mute Messages
     public Component muteChatBlocked(String timeRemaining) {
-        String base = raw("muteChatBlocked", "<red>Du bist gemutet! Verbleibende Zeit: {time}</red>");
-        return mm.deserialize(base.replace("{time}", timeRemaining));
+        return msg("muteChatBlocked", "<red>Du bist gemutet! Verbleibende Zeit: {time}</red>", "{time}", timeRemaining);
     }
 
     public Component muteCommandBlocked(String timeRemaining) {
-        String base = raw("muteCommandBlocked", "<red>Du bist gemutet und kannst diesen Befehl nicht nutzen! Verbleibende Zeit: {time}</red>");
-        return mm.deserialize(base.replace("{time}", timeRemaining));
+        return msg("muteCommandBlocked",
+                "<red>Du bist gemutet und kannst diesen Befehl nicht nutzen! Verbleibende Zeit: {time}</red>",
+                "{time}", timeRemaining);
     }
 
     public Component mutedMessage(String duration, String reason) {
         String base = raw("mutedMessage", "<red>Du wurdest für {duration} gemutet.\nGrund: {reason}</red>");
-        return mm.deserialize(base
-                .replace("{duration}", duration)
-                .replace("{reason}", reason));
+        return render("mutedMessage", base
+                .replace("{duration}", esc(duration))
+                .replace("{reason}", esc(reason)));
     }
 
     // Jail Messages
     public Component jailed() {
-        return mm.deserialize(raw("jailed", "<red>Du wurdest ins Gefängnis gesperrt!</red>"));
+        return msg("jailed", "<red>Du wurdest ins Gefängnis gesperrt!</red>");
     }
 
     public Component unjailed() {
-        return mm.deserialize(raw("unjailed", "<green>Du wurdest aus dem Gefängnis entlassen!</green>"));
+        return msg("unjailed", "<green>Du wurdest aus dem Gefängnis entlassen!</green>");
     }
 
     public Component jailEscape() {
-        return mm.deserialize(raw("jailEscape", "<red>Versuch nicht zu fliehen!</red>"));
+        return msg("jailEscape", "<red>Versuch nicht zu fliehen!</red>");
     }
 
     public Component jailNoTeleport() {
-        return mm.deserialize(raw("jailNoTeleport", "<red>Du kannst dich nicht teleportieren, während du im Gefängnis bist!</red>"));
+        return msg("jailNoTeleport", "<red>Du kannst dich nicht teleportieren, während du im Gefängnis bist!</red>");
     }
 
     public Component jailNoCommands() {
-        return mm.deserialize(raw("jailNoCommands", "<red>Du kannst keine Befehle im Gefängnis nutzen!</red>"));
+        return msg("jailNoCommands", "<red>Du kannst keine Befehle im Gefängnis nutzen!</red>");
+    }
+
+    public Component jailFailed() {
+        return msg("jailFailed", "<red>Der Spieler konnte nicht eingesperrt werden - siehe Server-Log.</red>");
     }
 
     // Warning Messages
     public Component warnedMessage(String reason) {
-        String base = raw("warnedMessage", "<yellow>Du wurdest verwarnt!\nGrund: {reason}</yellow>");
-        return mm.deserialize(base.replace("{reason}", reason));
+        return msg("warnedMessage", "<yellow>Du wurdest verwarnt!\nGrund: {reason}</yellow>", "{reason}", reason);
     }
 
     // Command Usage Messages
     public Component unknownCommand() {
-        return mm.deserialize(raw("unknownCommand", "<red>Unbekannter Befehl.</red>"));
+        return msg("unknownCommand", "<red>Unbekannter Befehl.</red>");
     }
 
     public Component muteUsage() {
-        return mm.deserialize(raw("muteUsage", "Nutzung: /mute <Spieler> <Dauer> [Grund]"));
+        return msg("muteUsage", "Nutzung: /mute <Spieler> <Dauer> [Grund]");
     }
 
     public Component muteExamples() {
-        return mm.deserialize(raw("muteExamples", "Beispiele: /mute Player 1h, /mute Player permanent Spam"));
+        return msg("muteExamples", "Beispiele: /mute Player 1h, /mute Player permanent Spam");
     }
 
     public Component mutedSuccess(String victim, String duration) {
         String base = raw("mutedSuccess", "{victim} wurde für {duration} gemutet.");
-        return mm.deserialize(base
-                .replace("{victim}", victim)
-                .replace("{duration}", duration));
+        return render("mutedSuccess", base
+                .replace("{victim}", esc(victim))
+                .replace("{duration}", esc(duration)));
     }
 
     public Component muteCancelled() {
-        return mm.deserialize(raw("muteCancelled", "Mute wurde durch ein Event abgebrochen."));
+        return msg("muteCancelled", "Mute wurde durch ein Event abgebrochen.");
     }
 
     public Component unmuteUsage() {
-        return mm.deserialize(raw("unmuteUsage", "Nutzung: /unmute <Spieler> [Grund]"));
+        return msg("unmuteUsage", "Nutzung: /unmute <Spieler> [Grund]");
     }
 
     public Component unmutedSuccess(String player) {
-        String base = raw("unmutedSuccess", "{player} wurde entmutet.");
-        return mm.deserialize(base.replace("{player}", player));
+        return msg("unmutedSuccess", "{player} wurde entmutet.", "{player}", player);
+    }
+
+    public Component notMuted(String player) {
+        return msg("notMuted", "<yellow>{player} ist nicht gemutet.</yellow>", "{player}", player);
     }
 
     public Component jailNotSet() {
-        return mm.deserialize(raw("jailNotSet", "Jail-Position ist nicht gesetzt! Nutze /setjail"));
+        return msg("jailNotSet", "Jail-Position ist nicht gesetzt! Nutze /setjail");
     }
 
     public Component jailUsage() {
-        return mm.deserialize(raw("jailUsage", "Nutzung: /jail <Spieler> <Dauer> [Zelle] [Grund]"));
+        return msg("jailUsage", "Nutzung: /jail <Spieler> <Dauer> [Zelle] [Grund]");
     }
 
     public Component jailExamples() {
-        return mm.deserialize(raw("jailExamples", "Beispiele: /jail Player 30m, /jail Player 1h 2 Griefing"));
+        return msg("jailExamples", "Beispiele: /jail Player 30m, /jail Player 1h 2 Griefing");
     }
 
     public Component jailedSuccess(String victim, String duration) {
         String base = raw("jailedSuccess", "{victim} wurde für {duration} eingesperrt.");
-        return mm.deserialize(base
-                .replace("{victim}", victim)
-                .replace("{duration}", duration));
+        return render("jailedSuccess", base
+                .replace("{victim}", esc(victim))
+                .replace("{duration}", esc(duration)));
     }
 
     public Component jailCancelled() {
-        return mm.deserialize(raw("jailCancelled", "Jail wurde durch ein Event abgebrochen."));
+        return msg("jailCancelled", "Jail wurde durch ein Event abgebrochen.");
     }
 
     public Component unjailUsage() {
-        return mm.deserialize(raw("unjailUsage", "Nutzung: /unjail <Spieler> [Grund]"));
+        return msg("unjailUsage", "Nutzung: /unjail <Spieler> [Grund]");
     }
 
     public Component playerNotOnline() {
-        return mm.deserialize(raw("playerNotOnline", "Spieler nicht online."));
+        return msg("playerNotOnline", "Spieler nicht online.");
     }
 
     public Component unjailedSuccess(String player) {
-        String base = raw("unjailedSuccess", "{player} wurde freigelassen.");
-        return mm.deserialize(base.replace("{player}", player));
+        return msg("unjailedSuccess", "{player} wurde freigelassen.", "{player}", player);
+    }
+
+    public Component notJailed(String player) {
+        return msg("notJailed", "<yellow>{player} ist nicht eingesperrt.</yellow>", "{player}", player);
     }
 
     public Component warnUsage() {
-        return mm.deserialize(raw("warnUsage", "Nutzung: /warn <Spieler> <Grund>"));
+        return msg("warnUsage", "Nutzung: /warn <Spieler> <Grund>");
     }
 
     public Component warnedSuccess(String victim) {
-        String base = raw("warnedSuccess", "{victim} wurde verwarnt.");
-        return mm.deserialize(base.replace("{victim}", victim));
+        return msg("warnedSuccess", "{victim} wurde verwarnt.", "{victim}", victim);
     }
 
     public Component warnCount(long count, int threshold) {
         String base = raw("warnCount", "Du hast jetzt {count}/{threshold} Verwarnungen.");
-        return mm.deserialize(base
+        return render("warnCount", base
                 .replace("{count}", String.valueOf(count))
                 .replace("{threshold}", String.valueOf(threshold)));
     }
 
     public Component jailLocationSet() {
-        return mm.deserialize(raw("jailLocationSet", "Jail-Position gesetzt!"));
+        return msg("jailLocationSet", "Jail-Position gesetzt!");
     }
 
-    public Component bhUsage() {
-        return mm.deserialize(raw("bhUsage", "Nutzung: /banhammer [give|reload|pack|history|unban|stats|appeals|approve|deny]"));
+    /**
+     * Usage line for {@code /banhammer}.
+     *
+     * <p>The subcommand list is generated by the command itself and passed in, so it can never
+     * drift out of sync with the commands that actually exist. The previous key held the whole
+     * sentence including a hand-written list, which is how an already-removed "pack" subcommand
+     * kept being advertised on servers whose message file predated its removal.
+     *
+     * @param commands the pipe-separated subcommands available to the sender
+     */
+    public Component usageBanHammer(String commands) {
+        return msg("usageBanHammer", "Nutzung: /banhammer [{commands}]", "{commands}", commands);
     }
 
     public Component giveUsage() {
-        return mm.deserialize(raw("giveUsage", "Nutzung: /banhammer give <Spieler>"));
+        return msg("giveUsage", "Nutzung: /banhammer give <Spieler>");
     }
 
+    public Component inventoryFull(String player) {
+        return msg("inventoryFull", "<red>Inventar von {player} ist voll.</red>", "{player}", player);
+    }
 
     public Component historyUsage() {
-        return mm.deserialize(raw("historyUsage", "Nutzung: /bh history <Spieler> [Seite]"));
+        return msg("historyUsage", "Nutzung: /bh history <Spieler> [Seite]");
     }
 
     public Component unbanUsage() {
-        return mm.deserialize(raw("unbanUsage", "Nutzung: /bh unban <Spieler> [Grund]"));
+        return msg("unbanUsage", "Nutzung: /bh unban <Spieler> [Grund]");
     }
 
     public Component statsUsage() {
-        return mm.deserialize(raw("statsUsage", "Nutzung: /bh stats <Spieler>"));
+        return msg("statsUsage", "Nutzung: /bh stats <Spieler>");
     }
 
     public Component approveUsage() {
-        return mm.deserialize(raw("approveUsage", "Nutzung: /bh approve <ID> [Antwort]"));
+        return msg("approveUsage", "Nutzung: /bh approve <ID> [Antwort]");
     }
 
     public Component denyUsage() {
-        return mm.deserialize(raw("denyUsage", "Nutzung: /bh deny <ID> [Antwort]"));
+        return msg("denyUsage", "Nutzung: /bh deny <ID> [Antwort]");
     }
 
     public Component appealAlreadyProcessed() {
-        return mm.deserialize(raw("appealAlreadyProcessed", "Dieser Appeal wurde bereits bearbeitet."));
+        return msg("appealAlreadyProcessed", "Dieser Appeal wurde bereits bearbeitet.");
     }
 
     public Component appealsDisabled() {
-        return mm.deserialize(raw("appealsDisabled", "Appeals sind auf diesem Server deaktiviert."));
+        return msg("appealsDisabled", "Appeals sind auf diesem Server deaktiviert.");
     }
 
     public Component appealUsage() {
-        return mm.deserialize(raw("appealUsage", "Nutzung: /appeal <Text>"));
+        return msg("appealUsage", "Nutzung: /appeal <Text>");
     }
 }

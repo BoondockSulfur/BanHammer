@@ -1,24 +1,30 @@
 # Deutsche Nachrichten für BanHammer
+#
+# Formatierung per MiniMessage: https://docs.advntr.dev/minimessage/format.html
+# In {Platzhalter} eingesetzte Werte werden als reiner Text eingefügt - ein Spieler kann
+# also über Grund oder Appeal-Text keine MiniMessage-Tags in Staff-Ausgaben einschleusen.
+
 prefix: "<gold>[BanHammer]</gold> "
 noPermission: "<red>Du hast keine Berechtigung.</red>"
 reloaded: "<green>Konfiguration neu geladen.</green>"
 notPlayer: "<red>Nur im Spiel verfügbar.</red>"
 noTarget: "<yellow>Kein Spieler im Visier!</yellow>"
-cannotBan: "<red>Du kannst diesen Spieler nicht bannen.</red>"
+cannotBan: "<red>Du kannst diesen Spieler nicht bestrafen.</red>"
 given: "<green>Ban Hammer an {player} gegeben.</green>"
+inventoryFull: "<red>Das Inventar von {player} ist voll.</red>"
 cooldown: "<yellow>Warte noch {seconds}s.</yellow>"
 bannedBroadcast: "<gold>{staff}</gold> hat <red>{victim}</red>{duration} gebannt."
 bannedStaff: "<green>{victim}</green> gebannt{duration}."
 tempBannedBroadcast: "<gold>{staff}</gold> hat <red>{victim}</red> für {duration} gebannt."
 tempBannedStaff: "<green>{victim}</green> für {duration} gebannt."
 kickedStaff: "<green>{victim}</green> gekickt."
-databaseDisabled: "<red>Datenbank ist nicht aktiviert.</red>"
+databaseDisabled: "<red>Diese Funktion benötigt die Datenbank (database.enabled: true).</red>"
 playerNotFound: "<red>Spieler nicht gefunden.</red>"
 unbanned: "<green>{player} wurde entbannt.</green>"
 unbanReason: "<gray>Grund: {reason}</gray>"
 notBanned: "<yellow>{player} ist nicht gebannt.</yellow>"
 
-# History
+# Historie
 historyHeader: "<gold>--- Ban-Historie von {player} (Seite {page}/{maxPages}) ---</gold>"
 historyEntry: "<gray>#{id}</gray> <yellow>{type}</yellow> - <white>{reason}</white>"
 historyEntryDate: "  <gray>Datum: {date}</gray>"
@@ -28,76 +34,156 @@ historyEntryActive: "  <red>[AKTIV]</red>"
 historyEmpty: "<yellow>Keine Einträge gefunden.</yellow>"
 historyInvalidPage: "<red>Ungültige Seitennummer.</red>"
 
-# Stats
+# Statistiken
 statsHeader: "<gold>--- Statistiken {target} ---</gold>"
 statsTotal: "<gray>Gesamt:</gray> <white>{total} Bestrafungen</white>"
 statsBans: "<gray>Bans:</gray> <white>{bans}</white>"
 statsKicks: "<gray>Kicks:</gray> <white>{kicks}</white>"
 statsMutes: "<gray>Mutes:</gray> <white>{mutes}</white>"
-statsWarnings: "<gray>Warnungen:</gray> <white>{warnings}</white>"
+statsJails: "<gray>Jails:</gray> <white>{jails}</white>"
+statsWarnings: "<gray>Verwarnungen:</gray> <white>{warnings}</white>"
 
 # Appeals
-appealSubmitted: "<green>Dein Appeal wurde eingereicht.</green>"
+appealSubmitted: "<green>Dein Einspruch wurde eingereicht.</green>"
 appealCooldown: "<red>Du musst noch {hours} Stunden warten.</red>"
-appealNoActiveBan: "<red>Du hast keinen aktiven Ban.</red>"
-appealTooShort: "<red>Der Appeal-Text muss mindestens 20 Zeichen lang sein.</red>"
-appealMaxReached: "<red>Du hast bereits die maximale Anzahl an Appeals erreicht.</red>"
-appealsHeader: "<gold>--- Offene Appeals ({count}) ---</gold>"
+appealNoActiveBan: "<red>Du hast keine aktive Bestrafung, gegen die du Einspruch einlegen kannst.</red>"
+appealTooShort: "<red>Der Einspruchs-Text ist zu kurz.</red>"
+appealMaxReached: "<red>Du hast die maximale Anzahl an Einsprüchen für diese Bestrafung erreicht.</red>"
+appealsHeader: "<gold>--- Offene Einsprüche ({count}) ---</gold>"
 appealsEntry: "<gray>#{id}</gray> <yellow>{player}</yellow> - {text}"
 appealsEntryDate: "  <gray>{date}</gray>"
-appealsEmpty: "<yellow>Keine offenen Appeals.</yellow>"
-appealsInvalidId: "<red>Ungültige Appeal-ID.</red>"
-appealApproved: "<green>Appeal #{id} wurde genehmigt.</green>"
-appealDenied: "<red>Appeal #{id} wurde abgelehnt.</red>"
-appealNotification: "<green>Dein Appeal wurde bearbeitet: {status}</green>"
+appealsEmpty: "<yellow>Keine offenen Einsprüche.</yellow>"
+appealsInvalidId: "<red>Ungültige Einspruchs-ID.</red>"
+appealApproved: "<green>Einspruch #{id} wurde genehmigt.</green>"
+appealDenied: "<red>Einspruch #{id} wurde abgelehnt.</red>"
+appealNotification: "<green>Dein Einspruch wurde bearbeitet: {status}</green>"
 appealResponse: "<gray>Antwort: {response}</gray>"
+appealAlreadyProcessed: "<yellow>Dieser Einspruch wurde bereits bearbeitet.</yellow>"
+appealsDisabled: "<red>Einsprüche sind auf diesem Server deaktiviert.</red>"
+appealUsage: "Nutzung: /appeal <Text>"
 
-# Errors
-errorOccurred: "<red>Ein Fehler ist aufgetreten.</red>"
-invalidDuration: "<red>Ungültige Dauer. Beispiele: 7d, 1h30m, permanent</red>"
+# Fehler
+errorOccurred: "<red>Ein Fehler ist aufgetreten. Details stehen im Server-Log.</red>"
+invalidDuration: "<red>Ungültige Dauer. Beispiele: 30m, 1h30m, 7d, 2w, permanent</red>"
 
-# Mute Messages
+# Mute
 muteChatBlocked: "<red>Du bist gemutet! Verbleibende Zeit: {time}</red>"
 muteCommandBlocked: "<red>Du bist gemutet und kannst diesen Befehl nicht nutzen! Verbleibende Zeit: {time}</red>"
 mutedMessage: "<red>Du wurdest für {duration} gemutet.\nGrund: {reason}</red>"
+notMuted: "<yellow>{player} ist nicht gemutet.</yellow>"
 
-# Jail Messages
+# Jail
 jailed: "<red>Du wurdest ins Gefängnis gesperrt!</red>"
 unjailed: "<green>Du wurdest aus dem Gefängnis entlassen!</green>"
 jailEscape: "<red>Versuch nicht zu fliehen!</red>"
 jailNoTeleport: "<red>Du kannst dich nicht teleportieren, während du im Gefängnis bist!</red>"
 jailNoCommands: "<red>Du kannst keine Befehle im Gefängnis nutzen!</red>"
+jailFailed: "<red>Der Spieler konnte nicht eingesperrt werden - siehe Server-Log.</red>"
+notJailed: "<yellow>{player} ist nicht eingesperrt.</yellow>"
 
-# Warning Messages
+# Verwarnungen
 warnedMessage: "<yellow>Du wurdest verwarnt!\nGrund: {reason}</yellow>"
+warnCount: "Du hast jetzt {count}/{threshold} Verwarnungen."
 
-# Command Usage Messages
+# Befehls-Nutzung
 unknownCommand: "<red>Unbekannter Befehl.</red>"
 muteUsage: "Nutzung: /mute <Spieler> <Dauer> [Grund]"
 muteExamples: "Beispiele: /mute Player 1h, /mute Player permanent Spam"
 mutedSuccess: "{victim} wurde für {duration} gemutet."
-muteCancelled: "Mute wurde durch ein Event abgebrochen."
+muteCancelled: "Die Bestrafung wurde von einem anderen Plugin abgebrochen."
 unmuteUsage: "Nutzung: /unmute <Spieler> [Grund]"
 unmutedSuccess: "{player} wurde entmutet."
 jailNotSet: "Jail-Position ist nicht gesetzt! Nutze /setjail"
 jailUsage: "Nutzung: /jail <Spieler> <Dauer> [Zelle] [Grund]"
 jailExamples: "Beispiele: /jail Player 30m, /jail Player 1h 2 Griefing"
 jailedSuccess: "{victim} wurde für {duration} eingesperrt."
-jailCancelled: "Jail wurde durch ein Event abgebrochen."
+jailCancelled: "Die Bestrafung wurde von einem anderen Plugin abgebrochen."
 unjailUsage: "Nutzung: /unjail <Spieler> [Grund]"
-playerNotOnline: "Spieler nicht online."
+playerNotOnline: "Spieler ist nicht online."
 unjailedSuccess: "{player} wurde freigelassen."
 warnUsage: "Nutzung: /warn <Spieler> <Grund>"
 warnedSuccess: "{victim} wurde verwarnt."
-warnCount: "Du hast jetzt {count}/{threshold} Verwarnungen."
 jailLocationSet: "Jail-Position gesetzt!"
-bhUsage: "Nutzung: /banhammer [give|reload|pack|history|unban|stats|appeals|approve|deny]"
+usageBanHammer: "Nutzung: /banhammer [{commands}]"
 giveUsage: "Nutzung: /banhammer give <Spieler>"
 historyUsage: "Nutzung: /bh history <Spieler> [Seite]"
 unbanUsage: "Nutzung: /bh unban <Spieler> [Grund]"
 statsUsage: "Nutzung: /bh stats <Spieler>"
 approveUsage: "Nutzung: /bh approve <ID> [Antwort]"
 denyUsage: "Nutzung: /bh deny <ID> [Antwort]"
-appealAlreadyProcessed: "Dieser Appeal wurde bereits bearbeitet."
-appealsDisabled: "Appeals sind auf diesem Server deaktiviert."
-appealUsage: "Nutzung: /appeal <Text>"
+
+# ===== GUI-Beschriftungen =====
+# Reine Anzeige. Buttons werden intern identifiziert, Umbenennen ist also gefahrlos.
+gui:
+  title:
+    main: "BanHammer-Statistiken"
+    playerStats: "Spieler-Statistiken"
+    leaderboard: "Staff-Rangliste"
+    serverStats: "Server-Statistiken"
+  button:
+    playerStats: "<green>Deine Statistiken</green>"
+    playerStatsLore: "<gray>Zeigt deine Bestrafungs-Historie</gray>"
+    leaderboard: "<yellow>Staff-Rangliste</yellow>"
+    leaderboardLore: "<gray>Die aktivsten Team-Mitglieder</gray>"
+    serverStats: "<aqua>Server-Statistiken</aqua>"
+    serverStatsLore: "<gray>Gesamtübersicht aller Bestrafungen</gray>"
+    back: "<yellow>Zurück</yellow>"
+    close: "<red>Schließen</red>"
+    previousPage: "<yellow>Vorherige Seite</yellow>"
+    nextPage: "<yellow>Nächste Seite</yellow>"
+  header:
+    total: "<gold><b>Gesamt: {count}</b></gold>"
+  footer:
+    page: "<gray>Seite {page}</gray>"
+  entry:
+    id: "<gray>ID: {id}</gray>"
+    staff: "<gray>Von: {staff}</gray>"
+    reason: "<white>Grund: {reason}</white>"
+    date: "<gray>Datum: {date}</gray>"
+    active: "<green><b>AKTIV</b></green>"
+    rank: "<yellow>Rang: #{rank}</yellow>"
+  stat:
+    total: "<gray>Gesamt: {count}</gray>"
+    bans: "<red>Bans: {count}</red>"
+    kicks: "<yellow>Kicks: {count}</yellow>"
+    mutes: "<gold>Mutes: {count}</gold>"
+    jails: "<dark_gray>Jails: {count}</dark_gray>"
+    warnings: "<light_purple>Verwarnungen: {count}</light_purple>"
+  tile:
+    total: "<gold><b>Bestrafungen gesamt</b></gold>"
+    bans: "<red><b>Bans</b></red>"
+    kicks: "<yellow><b>Kicks</b></yellow>"
+    mutes: "<gold><b>Mutes</b></gold>"
+    jails: "<dark_gray><b>Jails</b></dark_gray>"
+    warnings: "<light_purple><b>Verwarnungen</b></light_purple>"
+
+# ===== Discord-Beschriftungen =====
+# Klartext: Discord-Embeds verstehen kein MiniMessage.
+discord:
+  title:
+    banned: "Spieler gebannt"
+    tempBanned: "Spieler zeitweise gebannt"
+    kicked: "Spieler gekickt"
+    muted: "Spieler gemutet"
+    jailed: "Spieler eingesperrt"
+    warned: "Spieler verwarnt"
+    regionBanned: "Spieler regionsgebannt"
+    unbanned: "Spieler entbannt"
+    unmuted: "Spieler entmutet"
+    released: "Spieler freigelassen"
+    regionBanRemoved: "Regions-Bann aufgehoben"
+    punishmentRemoved: "Bestrafung aufgehoben"
+    newAppeal: "Neuer Einspruch eingereicht"
+    appealApproved: "Einspruch genehmigt"
+    appealDenied: "Einspruch abgelehnt"
+  field:
+    player: "Spieler"
+    staff: "Team"
+    reason: "Grund"
+    duration: "Dauer"
+    removedBy: "Aufgehoben von"
+    appealId: "Einspruchs-ID"
+    appealText: "Einspruchs-Text"
+    reviewedBy: "Bearbeitet von"
+    response: "Antwort"
+    server: "Server"

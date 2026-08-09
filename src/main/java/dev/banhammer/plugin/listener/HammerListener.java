@@ -1,7 +1,10 @@
 package dev.banhammer.plugin.listener;
 
 import dev.banhammer.plugin.BanHammerPlugin;
+import dev.banhammer.plugin.manager.PunishmentManager.PunishmentResult;
+import dev.banhammer.plugin.util.BanLists;
 import dev.banhammer.plugin.util.DurationParser;
+import dev.banhammer.plugin.util.FoliaScheduler;
 import dev.banhammer.plugin.util.ItemFactory;
 import dev.banhammer.plugin.util.Messages;
 import dev.banhammer.plugin.util.Settings;
@@ -38,7 +41,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import net.kyori.adventure.text.Component;
 
 import static dev.banhammer.plugin.util.Constants.*;
-import static dev.banhammer.plugin.util.ReflectionUtil.*;
 
 public final class HammerListener implements Listener {
 
@@ -128,6 +130,12 @@ public final class HammerListener implements Listener {
 
         // LINKS-KLICK auf Luft/Block = Ray-Trace Kick/Jail
         if (a == Action.LEFT_CLICK_AIR || a == Action.LEFT_CLICK_BLOCK) {
+            // Checked before the ray trace, so holding the item without permission neither
+            // costs a world scan nor produces a "no target" message.
+            if (!staff.hasPermission("banhammer.use")) {
+                return;
+            }
+
             Player target = findTarget(staff, RAY_TRACE_MAX_DISTANCE);
             if (target == null) {
                 sendCompat(staff, messages.noTarget());
@@ -178,59 +186,74 @@ public final class HammerListener implements Listener {
             sendCompat(staff, messages.cooldown(cooldownRemaining(staff)));
             return;
         }
-        if (!canPunish(staff, victim)) {
-            sendCompat(staff, messages.cannotBan()); // vorhandene Msg wiederverwenden
+        if (!plugin.getPunishmentManager().canPunish(staff, victim)) {
+            sendCompat(staff, messages.cannotBan());
             return;
+        }
+
+        dev.banhammer.plugin.preset.KickJailPreset preset =
+                plugin.getPresetManager().getActiveKickJailPreset(staff.getUniqueId());
+
+        // Every guard runs BEFORE the effects. Striking lightning and applying knockback first
+        // and only then refusing the action turned the hammer into a grief tool for anyone who
+        // held it without the matching permission.
+        if (preset.isJail()) {
+            if (!plugin.settings().jail().enabled()) {
+                sendCompat(staff, "<red>The jail system is disabled.</red>");
+                return;
+            }
+            if (!staff.hasPermission("banhammer.jail")) {
+                sendCompat(staff, messages.noPermission());
+                return;
+            }
         }
 
         setCooldown(staff);
         doFx(staff, victim);
 
-        // Get active kick/jail preset
-        dev.banhammer.plugin.preset.KickJailPreset preset = plugin.getPresetManager().getActiveKickJailPreset(staff.getUniqueId());
-
-        // Use preset values
         String reason = preset.getReason();
         Duration dur = preset.getDuration();
 
         plugin.getSLF4JLogger().debug("Kick/Jail with preset '{}': {} ({})",
-                preset.getDisplayName(),
-                victim.getName(),
-                preset.getDurationDisplay());
+                preset.getDisplayName(), victim.getName(), preset.getDurationDisplay());
 
-        // Check if this is a kick (no duration) or jail (with duration)
         if (preset.isKick()) {
-            // Execute kick
             if (plugin.getPunishmentManager().isDatabaseEnabled()) {
                 plugin.getPunishmentManager().kickPlayer(staff, victim, reason)
-                    .thenAccept(id -> {
-                        if (id >= 0) {
-                            sendCompat(staff, messages.kickedStaff(victim.getName()));
-                        }
-                    });
+                        .thenAccept(result -> {
+                            if (result.isSuccess()) {
+                                sendCompat(staff, messages.kickedStaff(victim.getName()));
+                            }
+                        })
+                        .exceptionally(throwable -> logFailure(staff, "kick " + victim.getName(), throwable));
             } else {
                 kickCompat(staff, victim, reason);
             }
         } else {
-            // Execute jail
-            if (!plugin.getConfig().getBoolean("punishmentTypes.jail.enabled", true)) {
-                sendCompat(staff, "<red>Jail system is disabled!</red>");
-                return;
-            }
-
-            if (!staff.hasPermission("banhammer.jail")) {
-                sendCompat(staff, "<red>You don't have permission to jail players!</red>");
-                return;
-            }
-
             plugin.getPunishmentManager().jailPlayer(staff, victim, reason, dur)
-                .thenAccept(id -> {
-                    if (id > 0) {
-                        String durHuman = formatDurationHuman(dur);
-                        sendCompat(staff, "<green>" + victim.getName() + " was jailed for " + durHuman + "</green>");
-                    }
-                });
+                    .thenAccept(result -> {
+                        if (result.isSuccess()) {
+                            sendCompat(staff, messages.jailedSuccess(victim.getName(),
+                                    DurationParser.formatHuman(dur)));
+                        } else if (result.status() == PunishmentResult.Status.FAILED) {
+                            sendCompat(staff, messages.jailFailed());
+                        }
+                    })
+                    .exceptionally(throwable -> logFailure(staff, "jail " + victim.getName(), throwable));
         }
+    }
+
+    /**
+     * Reports a failed punishment instead of letting the exception vanish into the future.
+     */
+    private Void logFailure(Player staff, String what, Throwable throwable) {
+        plugin.getSLF4JLogger().error("Hammer action failed: {}", what, throwable);
+        FoliaScheduler.runGlobal(plugin, () -> {
+            if (staff.isOnline()) {
+                staff.sendMessage(messages.errorOccurred());
+            }
+        });
+        return null;
     }
 
     // „Ban-Flow" für Rechtsklick - verwendet aktuelles Preset
@@ -241,21 +264,28 @@ public final class HammerListener implements Listener {
             sendCompat(staff, messages.cooldown(cooldownRemaining(staff)));
             return;
         }
-        if (!canPunish(staff, victim)) {
+        if (!plugin.getPunishmentManager().canPunish(staff, victim)) {
             sendCompat(staff, messages.cannotBan());
+            return;
+        }
+
+        dev.banhammer.plugin.preset.BanPreset preset = plugin.getPresetManager().getActivePreset(staff.getUniqueId());
+
+        String reason = preset.getReason();
+        Duration dur = preset.getDuration();
+        // autoIpBan forces every hammer ban to be an IP ban, regardless of the preset.
+        Settings.IpBan ipSettings = plugin.settings().ipBan();
+        boolean ipBan = ipSettings.enabled() && (preset.isIpBan() || ipSettings.autoIpBan());
+
+        // banhammer.ipban was declared in plugin.yml but never actually checked, so anyone
+        // with banhammer.use could cycle to an IP-ban preset and issue IP bans.
+        if (ipBan && !staff.hasPermission("banhammer.ipban")) {
+            sendCompat(staff, messages.noPermission());
             return;
         }
 
         setCooldown(staff);
         doFx(staff, victim);
-
-        // Get active preset
-        dev.banhammer.plugin.preset.BanPreset preset = plugin.getPresetManager().getActivePreset(staff.getUniqueId());
-
-        // Use preset values
-        String reason = preset.getReason();
-        Duration dur = preset.getDuration();
-        boolean ipBan = preset.isIpBan();
 
         plugin.getSLF4JLogger().debug("Ban with preset '{}': {} ({}{})",
                 preset.getDisplayName(),
@@ -265,15 +295,17 @@ public final class HammerListener implements Listener {
 
         if (plugin.getPunishmentManager().isDatabaseEnabled()) {
             plugin.getPunishmentManager().banPlayer(staff, victim, reason, dur, ipBan)
-                .thenAccept(id -> {
-                    if (id > 0) {
-                        String durHuman = (dur == null || dur.isZero()) ? "" : " " + formatDurationHuman(dur);
+                    .thenAccept(result -> {
+                        if (!result.isSuccess()) {
+                            return;
+                        }
+                        String durHuman = formatDurationHuman(dur);
                         sendCompat(staff, messages.bannedStaff(victim.getName(), durHuman));
-                        if (plugin.getConfig().getBoolean("ban.broadcast", true)) {
+                        if (settings.ban().broadcast()) {
                             broadcastCompat(messages.bannedBroadcast(staff.getName(), victim.getName(), durHuman));
                         }
-                    }
-                });
+                    })
+                    .exceptionally(throwable -> logFailure(staff, "ban " + victim.getName(), throwable));
         } else {
             performBanCompat(staff, victim, reason, dur);
         }
@@ -340,12 +372,6 @@ public final class HammerListener implements Listener {
         }
 
         plugin.getSLF4JLogger().debug("Player {} switched to kick/jail preset: {}", staff.getName(), preset.getDisplayName());
-    }
-
-    private boolean canPunish(Player staff, Player victim) {
-        if (staff.getUniqueId().equals(victim.getUniqueId())) return false;
-        if (victim.hasPermission("banhammer.bypass") || victim.isOp()) return false;
-        return true;
     }
 
     /* =========================
@@ -423,9 +449,10 @@ public final class HammerListener implements Listener {
                     victim.getName(), seconds, expires);
         }
 
-        // Apply ban to Minecraft ban list
+        // Apply ban to Minecraft ban list (by account, not by name)
         try {
-            Bukkit.getBanList(BanList.Type.NAME).addBan(
+            BanLists.ban(
+                    victim.getUniqueId(),
                     victim.getName(),
                     reason == null ? "" : reason.toString(),
                     (expires == null) ? null : java.util.Date.from(expires),
@@ -447,9 +474,9 @@ public final class HammerListener implements Listener {
 
         // Send success messages
         try {
-            String durHuman = (expires == null) ? "" : " " + formatDurationHuman(duration);
+            String durHuman = formatDurationHuman(duration);
             sendCompat(staff, messages.bannedStaff(victim.getName(), durHuman));
-            if (plugin.getConfig().getBoolean("ban.broadcast", true)) {
+            if (settings.ban().broadcast()) {
                 broadcastCompat(messages.bannedBroadcast(staff.getName(), victim.getName(), durHuman));
             }
         } catch (Exception ex) {
@@ -497,7 +524,6 @@ public final class HammerListener implements Listener {
        ========================= */
 
     // Direct access to Settings instead of Reflection
-    private Object  cfgKickReason()          { return plugin.getConfig().getString("kick.reason", settings.reason()); }
     private boolean cfgFxLightning()         { return settings.fxLightning(); }
     private boolean cfgFxSound()             { return settings.fxSound(); }
     private boolean cfgFxParticles()         { return settings.fxParticles(); }
@@ -505,8 +531,6 @@ public final class HammerListener implements Listener {
     private double  cfgKnockbackHorizontal() { return settings.knockbackHorizontal(); }
     private double  cfgKnockbackVertical()   { return settings.knockbackVertical(); }
     private int     cfgCooldownSeconds()     { return settings.cooldownSeconds(); }
-    private Object  cfgBanReason()           { return settings.reason(); }
-    private String  cfgBanDuration()         { return settings.duration(); }
 
     /* =========================
        MESSAGE/KICK KOMPAT-HILFEN
@@ -525,17 +549,28 @@ public final class HammerListener implements Listener {
         }
     }
 
+    /**
+     * Broadcasts on the main/global thread.
+     *
+     * <p>Broadcasting walks the online-player list, which is not safe to touch from the
+     * database callback threads these messages are produced on.
+     */
     private void broadcastCompat(Object msg) {
+        final Component component;
         if (msg instanceof Component comp) {
-            Bukkit.getServer().broadcast(comp);
+            component = comp;
         } else {
-            net.kyori.adventure.text.minimessage.MiniMessage mm = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage();
+            String raw = msg == null ? "" : String.valueOf(msg);
+            Component parsed;
             try {
-                Bukkit.getServer().broadcast(mm.deserialize(msg == null ? "" : String.valueOf(msg)));
+                parsed = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(raw);
             } catch (Exception e) {
-                Bukkit.getServer().broadcast(Component.text(msg == null ? "" : String.valueOf(msg)));
+                parsed = Component.text(raw);
             }
+            component = parsed;
         }
+
+        FoliaScheduler.runGlobal(plugin, () -> Bukkit.getServer().broadcast(component));
     }
 
     private void kickOnlyCompat(Player victim, Object reason) {
@@ -567,7 +602,7 @@ public final class HammerListener implements Listener {
         Long last = switchCooldowns.get(p.getUniqueId());
         if (last == null) return false;
 
-        long cooldownMs = plugin.getConfig().getLong("presetSwitchCooldown", 250);
+        long cooldownMs = settings.presetSwitchCooldownMillis();
         long elapsed = System.currentTimeMillis() - last;
         return elapsed < cooldownMs;
     }
@@ -580,7 +615,7 @@ public final class HammerListener implements Listener {
         Long last = switchKickJailCooldowns.get(p.getUniqueId());
         if (last == null) return false;
 
-        long cooldownMs = plugin.getConfig().getLong("presetSwitchCooldown", 250);
+        long cooldownMs = settings.presetSwitchCooldownMillis();
         long elapsed = System.currentTimeMillis() - last;
         return elapsed < cooldownMs;
     }

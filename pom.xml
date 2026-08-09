@@ -5,14 +5,25 @@
 
   <groupId>dev.banhammer</groupId>
   <artifactId>banhammer</artifactId>
-  <version>4.0.1</version>
+  <version>4.1.0</version>
   <name>BanHammer</name>
   <description>Admin Ban Hammer for Paper 26.1.x - Enhanced Edition</description>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>25</maven.compiler.release>
-    <paper.api>[26.1.2.build,)</paper.api>
+    <!--
+      Pinned to an exact version. An open range like [26.1.2.build,) makes builds
+      irreproducible and can silently pull in an API change between two builds of the
+      same commit.
+    -->
+    <paper.api>26.1.2.build.72-stable</paper.api>
+    <!-- Keep in sync with the 'libraries:' block in src/main/resources/plugin.yml -->
+    <hikari.version>5.1.0</hikari.version>
+    <sqlite.version>3.47.1.0</sqlite.version>
+    <mysql.version>9.1.0</mysql.version>
+    <gson.version>2.11.0</gson.version>
+    <discordWebhooks.version>0.8.4</discordWebhooks.version>
   </properties>
 
   <repositories>
@@ -31,34 +42,43 @@
     </dependency>
 
     <!-- Database Dependencies -->
+    <!--
+      Declared 'provided' because they are listed under 'libraries:' in plugin.yml: Paper
+      resolves them from Maven Central at startup and loads them in an isolated class loader.
+      Shading them produced a 22 MB jar (SQLite alone ships native binaries for every
+      platform) and required hand-maintained relocations to avoid clashing with other plugins.
+    -->
     <dependency>
       <groupId>com.zaxxer</groupId>
       <artifactId>HikariCP</artifactId>
-      <version>5.1.0</version>
+      <version>${hikari.version}</version>
+      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.xerial</groupId>
       <artifactId>sqlite-jdbc</artifactId>
-      <version>3.47.1.0</version>
+      <version>${sqlite.version}</version>
+      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>com.mysql</groupId>
       <artifactId>mysql-connector-j</artifactId>
-      <version>9.1.0</version>
+      <version>${mysql.version}</version>
+      <scope>provided</scope>
     </dependency>
 
-    <!-- JSON Processing (used by DiscordWebhook) -->
+    <!-- Also runtime-loaded; discord-webhooks pulls in OkHttp and the Kotlin stdlib. -->
     <dependency>
       <groupId>com.google.code.gson</groupId>
       <artifactId>gson</artifactId>
-      <version>2.11.0</version>
+      <version>${gson.version}</version>
+      <scope>provided</scope>
     </dependency>
-
-    <!-- Discord Webhook -->
     <dependency>
       <groupId>club.minnced</groupId>
       <artifactId>discord-webhooks</artifactId>
-      <version>0.8.4</version>
+      <version>${discordWebhooks.version}</version>
+      <scope>provided</scope>
     </dependency>
 
     <!-- bStats Metrics -->
@@ -67,6 +87,30 @@
       <artifactId>bstats-bukkit</artifactId>
       <version>3.0.0</version>
       <scope>compile</scope>
+    </dependency>
+
+    <!-- Tests -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.11.4</version>
+      <scope>test</scope>
+    </dependency>
+    <!--
+      'provided' dependencies are on the test classpath too, but SQLite is listed explicitly
+      so the database integration tests keep working if that scope ever changes.
+    -->
+    <dependency>
+      <groupId>org.xerial</groupId>
+      <artifactId>sqlite-jdbc</artifactId>
+      <version>${sqlite.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>2.0.16</version>
+      <scope>test</scope>
     </dependency>
   </dependencies>
 
@@ -78,7 +122,15 @@
         <version>3.14.0</version>
         <configuration>
           <release>${maven.compiler.release}</release>
+          <compilerArgs>
+            <arg>-Xlint:all,-serial,-processing</arg>
+          </compilerArgs>
         </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -91,19 +143,13 @@
               <goal>shade</goal>
             </goals>
             <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+              <!--
+                bStats is the only remaining shaded dependency; everything else is resolved
+                at runtime via the 'libraries:' block in plugin.yml. Relocating bStats is
+                required by its own guidelines so plugins do not fight over the class.
+              -->
               <relocations>
-                <relocation>
-                  <pattern>com.zaxxer.hikari</pattern>
-                  <shadedPattern>dev.banhammer.libs.hikari</shadedPattern>
-                </relocation>
-                <relocation>
-                  <pattern>com.google.gson</pattern>
-                  <shadedPattern>dev.banhammer.libs.gson</shadedPattern>
-                </relocation>
-                <relocation>
-                  <pattern>club.minnced.discord.webhook</pattern>
-                  <shadedPattern>dev.banhammer.libs.webhook</shadedPattern>
-                </relocation>
                 <relocation>
                   <pattern>org.bstats</pattern>
                   <shadedPattern>dev.banhammer.libs.bstats</shadedPattern>
@@ -116,6 +162,8 @@
                     <exclude>META-INF/*.SF</exclude>
                     <exclude>META-INF/*.DSA</exclude>
                     <exclude>META-INF/*.RSA</exclude>
+                    <exclude>META-INF/MANIFEST.MF</exclude>
+                    <exclude>module-info.class</exclude>
                   </excludes>
                 </filter>
               </filters>
@@ -125,4 +173,40 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!--
+      Opt-in static analysis: mvn -Pstatic-analysis verify
+
+      Not enabled by default because SpotBugs cannot yet read Java 25 bytecode (class file
+      major version 69) and aborts the build. Flip this profile on once SpotBugs ships
+      support; the configuration below is otherwise ready to use.
+    -->
+    <profile>
+      <id>static-analysis</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>com.github.spotbugs</groupId>
+            <artifactId>spotbugs-maven-plugin</artifactId>
+            <version>4.9.3.0</version>
+            <configuration>
+              <effort>Max</effort>
+              <threshold>Medium</threshold>
+              <includeTests>false</includeTests>
+              <excludeFilterFile>spotbugs-exclude.xml</excludeFilterFile>
+            </configuration>
+            <executions>
+              <execution>
+                <phase>verify</phase>
+                <goals>
+                  <goal>check</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>
