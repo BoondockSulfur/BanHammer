@@ -5,6 +5,8 @@ import dev.banhammer.plugin.database.model.PunishmentRecord;
 import dev.banhammer.plugin.util.DurationParser;
 import dev.banhammer.plugin.util.Settings;
 import io.papermc.paper.event.player.AsyncChatEvent;
+import org.bukkit.Bukkit;
+import org.bukkit.command.Command;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -35,7 +37,11 @@ public class MuteListener implements Listener {
         this.plugin = plugin;
     }
 
-    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    /**
+     * Not {@code ignoreCancelled}: {@link #onLegacyChat} already cancels the event for muted
+     * players, and the player still has to be told why.
+     */
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onChat(AsyncChatEvent event) {
         Settings.Mute mute = plugin.settings().mute();
         if (!mute.enabled() || !mute.preventChat()) {
@@ -64,7 +70,7 @@ public class MuteListener implements Listener {
             command = command.substring(colon + 1);
         }
 
-        if (!mute.blockedCommands().contains(command)) {
+        if (!isBlocked(command, mute.blockedCommands())) {
             return;
         }
 
@@ -72,6 +78,48 @@ public class MuteListener implements Listener {
         if (record != null) {
             event.setCancelled(true);
             event.getPlayer().sendMessage(plugin.messages().muteCommandBlocked(formatTimeRemaining(record)));
+        }
+    }
+
+    /**
+     * Checks the typed label and everything it resolves to: its command's name and all of its
+     * aliases. Comparing the label alone let a muted player keep whispering through /m, /pm,
+     * /whisper or /reply whenever only "msg" and "r" were listed.
+     */
+    private static boolean isBlocked(String label, java.util.Collection<String> blocked) {
+        if (blocked.contains(label)) {
+            return true;
+        }
+        Command command = Bukkit.getCommandMap().getCommand(label);
+        if (command == null) {
+            return false;
+        }
+        if (blocked.contains(command.getName().toLowerCase(Locale.ROOT))) {
+            return true;
+        }
+        for (String alias : command.getAliases()) {
+            if (blocked.contains(alias.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Cancels the legacy chat event as well. Paper fires it before {@link AsyncChatEvent}
+     * and only carries the cancellation over afterwards, so chat bridges and formatters that
+     * still listen to the legacy event would otherwise relay a muted player's message.
+     */
+    @SuppressWarnings("deprecation")
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    public void onLegacyChat(org.bukkit.event.player.AsyncPlayerChatEvent event) {
+        Settings.Mute mute = plugin.settings().mute();
+        if (!mute.enabled() || !mute.preventChat()) {
+            return;
+        }
+        if (activeMute(event.getPlayer()) != null) {
+            // The message to the player is sent by onChat; cancelling here is enough.
+            event.setCancelled(true);
         }
     }
 

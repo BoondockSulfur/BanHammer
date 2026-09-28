@@ -2,20 +2,17 @@ package dev.banhammer.plugin.listener;
 
 import dev.banhammer.plugin.BanHammerPlugin;
 import dev.banhammer.plugin.manager.PunishmentManager.PunishmentResult;
-import dev.banhammer.plugin.util.BanLists;
 import dev.banhammer.plugin.util.DurationParser;
 import dev.banhammer.plugin.util.FoliaScheduler;
 import dev.banhammer.plugin.util.ItemFactory;
 import dev.banhammer.plugin.util.Messages;
 import dev.banhammer.plugin.util.Settings;
 import dev.banhammer.plugin.util.Sounds;
-import org.bukkit.BanList;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.World;
-import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -31,7 +28,6 @@ import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -199,7 +195,7 @@ public final class HammerListener implements Listener {
         // held it without the matching permission.
         if (preset.isJail()) {
             if (!plugin.settings().jail().enabled()) {
-                sendCompat(staff, "<red>The jail system is disabled.</red>");
+                staff.sendMessage(messages.jailSystemDisabled());
                 return;
             }
             if (!staff.hasPermission("banhammer.jail")) {
@@ -217,18 +213,16 @@ public final class HammerListener implements Listener {
         plugin.getSLF4JLogger().debug("Kick/Jail with preset '{}': {} ({})",
                 preset.getDisplayName(), victim.getName(), preset.getDurationDisplay());
 
+        // Always through the manager, database or not: it fires PlayerPunishEvent, writes the
+        // audit log and notifies Discord, and it copes with a missing database itself.
         if (preset.isKick()) {
-            if (plugin.getPunishmentManager().isDatabaseEnabled()) {
-                plugin.getPunishmentManager().kickPlayer(staff, victim, reason)
-                        .thenAccept(result -> {
-                            if (result.isSuccess()) {
-                                sendCompat(staff, messages.kickedStaff(victim.getName()));
-                            }
-                        })
-                        .exceptionally(throwable -> logFailure(staff, "kick " + victim.getName(), throwable));
-            } else {
-                kickCompat(staff, victim, reason);
-            }
+            plugin.getPunishmentManager().kickPlayer(staff, victim, reason)
+                    .thenAccept(result -> {
+                        if (result.isSuccess()) {
+                            sendCompat(staff, messages.kickedStaff(victim.getName()));
+                        }
+                    })
+                    .exceptionally(throwable -> logFailure(staff, "kick " + victim.getName(), throwable));
         } else {
             plugin.getPunishmentManager().jailPlayer(staff, victim, reason, dur)
                     .thenAccept(result -> {
@@ -293,22 +287,22 @@ public final class HammerListener implements Listener {
                 preset.getDurationDisplay(),
                 ipBan ? ", IP-Ban" : "");
 
-        if (plugin.getPunishmentManager().isDatabaseEnabled()) {
-            plugin.getPunishmentManager().banPlayer(staff, victim, reason, dur, ipBan)
-                    .thenAccept(result -> {
-                        if (!result.isSuccess()) {
-                            return;
-                        }
-                        String durHuman = formatDurationHuman(dur);
-                        sendCompat(staff, messages.bannedStaff(victim.getName(), durHuman));
-                        if (settings.ban().broadcast()) {
-                            broadcastCompat(messages.bannedBroadcast(staff.getName(), victim.getName(), durHuman));
-                        }
-                    })
-                    .exceptionally(throwable -> logFailure(staff, "ban " + victim.getName(), throwable));
-        } else {
-            performBanCompat(staff, victim, reason, dur);
-        }
+        plugin.getPunishmentManager().banPlayer(staff, victim, reason, dur, ipBan)
+                .thenAccept(result -> {
+                    if (result.status() == PunishmentResult.Status.FAILED) {
+                        sendCompat(staff, messages.errorOccurred());
+                        return;
+                    }
+                    if (!result.isSuccess()) {
+                        return;
+                    }
+                    String durHuman = formatDurationHuman(dur);
+                    sendCompat(staff, messages.bannedStaff(victim.getName(), durHuman));
+                    if (settings.ban().broadcast()) {
+                        broadcastCompat(messages.bannedBroadcast(staff.getName(), victim.getName(), durHuman));
+                    }
+                })
+                .exceptionally(throwable -> logFailure(staff, "ban " + victim.getName(), throwable));
     }
 
     // Wechselt zum nächsten Preset (cycle)
@@ -436,59 +430,6 @@ public final class HammerListener implements Listener {
                 BAN/KICK
        ========================= */
 
-    private void performBanCompat(Player staff, Player victim, Object reason, Duration duration) {
-        Instant expires = (duration == null || duration.isZero() || duration.isNegative())
-                ? null
-                : Instant.now().plus(duration);
-
-        if (expires == null) {
-            plugin.getSLF4JLogger().debug("Vanilla ban: PERMANENT ban for {}", victim.getName());
-        } else {
-            long seconds = java.time.Duration.between(Instant.now(), expires).getSeconds();
-            plugin.getSLF4JLogger().debug("Vanilla ban: TEMPORARY ban for {} ({} seconds, expires at {})",
-                    victim.getName(), seconds, expires);
-        }
-
-        // Apply ban to Minecraft ban list (by account, not by name)
-        try {
-            BanLists.ban(
-                    victim.getUniqueId(),
-                    victim.getName(),
-                    reason == null ? "" : reason.toString(),
-                    (expires == null) ? null : java.util.Date.from(expires),
-                    staff.getName()
-            );
-        } catch (Exception ex) {
-            plugin.getSLF4JLogger().error("Failed to add ban to ban list", ex);
-            sendCompat(staff, "<red>Fehler beim Bannen: " + ex.getMessage() + "</red>");
-            return;
-        }
-
-        // Kick player (separate try-catch to ensure kick happens even if ban had issues)
-        try {
-            kickOnlyCompat(victim, reason);
-        } catch (Exception ex) {
-            plugin.getSLF4JLogger().error("Failed to kick player after ban (player is banned but still online)", ex);
-            // Continue anyway - player is banned, so they can't do much
-        }
-
-        // Send success messages
-        try {
-            String durHuman = formatDurationHuman(duration);
-            sendCompat(staff, messages.bannedStaff(victim.getName(), durHuman));
-            if (settings.ban().broadcast()) {
-                broadcastCompat(messages.bannedBroadcast(staff.getName(), victim.getName(), durHuman));
-            }
-        } catch (Exception ex) {
-            plugin.getSLF4JLogger().error("Failed to send ban confirmation messages", ex);
-        }
-    }
-
-    private void kickCompat(Player staff, Player victim, Object reason) {
-        kickOnlyCompat(victim, reason);
-        sendCompat(staff, messages.kickedStaff(victim.getName()));
-    }
-
     /* =========================
           COOLDOWN & UTIL
        ========================= */
@@ -571,14 +512,6 @@ public final class HammerListener implements Listener {
         }
 
         FoliaScheduler.runGlobal(plugin, () -> Bukkit.getServer().broadcast(component));
-    }
-
-    private void kickOnlyCompat(Player victim, Object reason) {
-        if (reason instanceof Component comp) {
-            victim.kick(comp);
-        } else {
-            victim.kick(Component.text(reason == null ? "" : String.valueOf(reason)));
-        }
     }
 
     private void sendActionBar(Player player, String message) {

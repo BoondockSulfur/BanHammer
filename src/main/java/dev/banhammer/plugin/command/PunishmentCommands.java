@@ -64,7 +64,7 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
         }
 
         if (!plugin.settings().mute().enabled()) {
-            reply(sender, error("The mute system is disabled in config.yml"));
+            reply(sender, prefixed(plugin.messages().muteSystemDisabled()));
             return;
         }
 
@@ -98,14 +98,14 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
         final String durationText = DurationParser.formatHuman(duration);
 
         plugin.getPunishmentManager().mutePlayer(sender, victim, finalReason, duration)
-                .thenAccept(result -> FoliaScheduler.runGlobal(plugin, () -> {
+                .thenAccept(result -> {
                     if (report(sender, result, victim.getName(), plugin.messages().errorOccurred())) {
                         reply(sender, prefixed(plugin.messages().mutedSuccess(victim.getName(), durationText)));
                         if (victim.isOnline()) {
                             victim.sendMessage(plugin.messages().mutedMessage(durationText, finalReason));
                         }
                     }
-                }))
+                })
                 .exceptionally(throwable -> fail(sender, "mute " + victim.getName(), throwable));
     }
 
@@ -139,7 +139,7 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
         }
 
         if (!plugin.settings().jail().enabled()) {
-            reply(sender, error("The jail system is disabled in config.yml"));
+            reply(sender, prefixed(plugin.messages().jailSystemDisabled()));
             return;
         }
 
@@ -168,19 +168,18 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
             return;
         }
 
-        // With Essentials the third argument is the cell; without it the reason starts there.
+        // With Essentials the third argument is the cell - but only if it names one. Otherwise
+        // it is the first word of the reason and the default cell is used, so
+        // "/jail Steve 1h Griefing" works without spelling out a cell.
         String cellName = null;
         int reasonStart = 2;
         if (essentials && args.length >= 3) {
             String requested = args[2];
             var cells = plugin.getJailManager().getEssentialsJailNames();
-            if (cells.stream().noneMatch(c -> c.equalsIgnoreCase(requested))) {
-                reply(sender, error("Essentials jail '" + requested + "' does not exist. Available: "
-                        + (cells.isEmpty() ? "(none)" : String.join(", ", cells))));
-                return;
+            if (cells.stream().anyMatch(c -> c.equalsIgnoreCase(requested))) {
+                cellName = requested;
+                reasonStart = 3;
             }
-            cellName = requested;
-            reasonStart = 3;
         }
 
         String reason = args.length > reasonStart
@@ -195,11 +194,11 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
         final String durationText = DurationParser.formatHuman(duration);
 
         plugin.getPunishmentManager().jailPlayer(sender, victim, checked, duration, cellName)
-                .thenAccept(result -> FoliaScheduler.runGlobal(plugin, () -> {
+                .thenAccept(result -> {
                     if (report(sender, result, victim.getName(), plugin.messages().jailFailed())) {
                         reply(sender, prefixed(plugin.messages().jailedSuccess(victim.getName(), durationText)));
                     }
-                }))
+                })
                 .exceptionally(throwable -> fail(sender, "jail " + victim.getName(), throwable));
     }
 
@@ -215,15 +214,9 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
 
         String playerName = args[0];
         Player target = Bukkit.getPlayerExact(playerName);
-        boolean databaseEnabled = plugin.getPunishmentManager().isDatabaseEnabled();
 
-        if (target == null && !databaseEnabled) {
-            // Without a database an offline player's jail exists only in memory, keyed by a
-            // UUID we can no longer resolve reliably.
-            reply(sender, prefixed(plugin.messages().playerNotOnline()));
-            return;
-        }
-
+        // Offline players are released on their next join (see JailManager), with or without a
+        // database, since the jail state is persisted in jails.yml.
         if (target != null) {
             FoliaScheduler.runOnEntity(plugin, target, () -> plugin.getJailManager().releasePlayer(target));
         } else {
@@ -239,7 +232,7 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
                 ? String.join(" ", Arrays.copyOfRange(args, 1, args.length))
                 : "Released by staff";
 
-        if (!databaseEnabled) {
+        if (!plugin.getPunishmentManager().isDatabaseEnabled()) {
             reply(sender, prefixed(plugin.messages().unjailedSuccess(playerName)));
             return;
         }
@@ -259,7 +252,7 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
         }
 
         if (!plugin.settings().warnings().enabled()) {
-            reply(sender, error("The warning system is disabled in config.yml"));
+            reply(sender, prefixed(plugin.messages().warnSystemDisabled()));
             return;
         }
 
@@ -294,13 +287,13 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
                     // A dedicated COUNT query rather than pulling the whole history and
                     // filtering it in memory, which also disagreed with the auto-ban counter.
                     plugin.getPunishmentManager().getWarningCount(victim.getUniqueId())
-                            .thenAccept(count -> FoliaScheduler.runGlobal(plugin, () -> {
+                            .thenAccept(count -> {
                                 reply(sender, prefixed(plugin.messages().warnedSuccess(victim.getName())));
                                 if (victim.isOnline()) {
                                     victim.sendMessage(plugin.messages().warnedMessage(finalReason));
                                     victim.sendMessage(plugin.messages().warnCount(count, threshold));
                                 }
-                            }));
+                            });
                 })
                 .exceptionally(throwable -> fail(sender, "warn " + victim.getName(), throwable));
     }
@@ -334,7 +327,10 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
 
         if (args.length == 1) {
             for (Player player : Bukkit.getOnlinePlayers()) {
-                suggestions.add(player.getName());
+                // Vanished players must not show up in suggestions.
+                if (!(sender instanceof Player viewer) || viewer.canSee(player)) {
+                    suggestions.add(player.getName());
+                }
             }
         } else if (args.length == 2 && (name.equals("mute") || name.equals("jail"))) {
             suggestions.addAll(DURATION_SUGGESTIONS);
@@ -381,7 +377,7 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
         ValidationUtil.ReasonPolicy policy = plugin.settings().reasonPolicy();
         ValidationUtil.ValidationResult validation = policy.validate(reason);
         if (!validation.isValid()) {
-            reply(sender, error(validation.getErrorMessageOrDefault("Invalid reason")));
+            reply(sender, prefixed(plugin.messages().validationError(validation, "Invalid reason")));
             return null;
         }
         return policy.filter(reason);

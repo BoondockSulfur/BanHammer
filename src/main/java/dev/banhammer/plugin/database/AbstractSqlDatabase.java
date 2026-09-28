@@ -44,13 +44,16 @@ import java.util.stream.Collectors;
 public abstract class AbstractSqlDatabase implements Database {
 
     /** Bumped whenever {@link #applyMigrations(Connection)} gains a new step. */
-    protected static final int SCHEMA_VERSION = 2;
+    protected static final int SCHEMA_VERSION = 3;
 
     protected final Logger logger;
     protected volatile HikariDataSource dataSource;
 
     private volatile ExecutorService executor;
     private volatile boolean healthy;
+
+    /** Set as soon as shutdown begins, so no new work is accepted while the pool drains. */
+    private volatile boolean closing;
 
     protected AbstractSqlDatabase(Logger logger) {
         this.logger = logger;
@@ -76,10 +79,17 @@ public abstract class AbstractSqlDatabase implements Database {
     /** Column type used for epoch-millisecond timestamps in this dialect. */
     protected abstract String timestampType();
 
+    /** Column type used for free text of unbounded length (reasons, responses). */
+    protected String freeTextType() {
+        return textType();
+    }
+
     // ==================== Lifecycle ====================
 
     @Override
     public CompletableFuture<Void> initialize() {
+        // Own thread rather than the common pool (see class comment): pool setup and schema
+        // migration are blocking I/O.
         return CompletableFuture.runAsync(() -> {
             try {
                 dataSource = createDataSource();
@@ -105,6 +115,10 @@ public abstract class AbstractSqlDatabase implements Database {
                 }
                 throw new CompletionException(e);
             }
+        }, runnable -> {
+            Thread thread = new Thread(runnable, "BanHammer-DB-Init");
+            thread.setDaemon(true);
+            thread.start();
         });
     }
 
@@ -121,6 +135,7 @@ public abstract class AbstractSqlDatabase implements Database {
     public CompletableFuture<Void> shutdown() {
         // Runs on its own thread: the pooled executor is exactly what we are draining, and
         // the caller may want to time this out.
+        closing = true;
         return CompletableFuture.runAsync(() -> {
             healthy = false;
 
@@ -198,10 +213,10 @@ public abstract class AbstractSqlDatabase implements Database {
         ensureColumn(conn, "punishments", "victim_ip", textType());
         ensureColumn(conn, "punishments", "server_name", textType());
         ensureColumn(conn, "punishments", "unban_staff_uuid", textType());
-        ensureColumn(conn, "punishments", "unban_reason", textType());
+        ensureColumn(conn, "punishments", "unban_reason", freeTextType());
         ensureColumn(conn, "punishments", "unbanned_at", timestampType());
         ensureColumn(conn, "appeals", "reviewer_name", textType());
-        ensureColumn(conn, "appeals", "review_response", textType());
+        ensureColumn(conn, "appeals", "review_response", freeTextType());
         ensureColumn(conn, "appeals", "reviewed_at", timestampType());
 
         applyDialectMigrations(conn, from);
@@ -284,24 +299,33 @@ public abstract class AbstractSqlDatabase implements Database {
     protected <T> CompletableFuture<T> run(String description, SqlWork<T> work) {
         ExecutorService current = executor;
         HikariDataSource source = dataSource;
-        if (current == null || source == null) {
+        if (closing || current == null || source == null) {
             return CompletableFuture.failedFuture(
-                    new IllegalStateException("Database is not initialized (" + description + ")"));
+                    new IllegalStateException("Database is not available (" + description + ")"));
         }
 
-        return CompletableFuture.supplyAsync(() -> {
-            try (Connection conn = source.getConnection()) {
-                T result = work.apply(conn);
-                healthy = true;
-                return result;
-            } catch (SQLException e) {
-                if (isConnectionProblem(e)) {
-                    healthy = false;
+        try {
+            return CompletableFuture.supplyAsync(() -> {
+                try (Connection conn = source.getConnection()) {
+                    T result = work.apply(conn);
+                    healthy = true;
+                    return result;
+                } catch (SQLException e) {
+                    if (isConnectionProblem(e)) {
+                        healthy = false;
+                    }
+                    logger.error("Database operation failed: {}", description, e);
+                    throw new CompletionException(e);
+                } catch (RuntimeException e) {
+                    logger.error("Database operation failed: {}", description, e);
+                    throw new CompletionException(e);
                 }
-                logger.error("Database operation failed: {}", description, e);
-                throw new CompletionException(e);
-            }
-        }, current);
+            }, current);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            // Shutdown started between the check above and the submit.
+            return CompletableFuture.failedFuture(
+                    new IllegalStateException("Database is shutting down (" + description + ")", e));
+        }
     }
 
     private static boolean isConnectionProblem(SQLException e) {
@@ -354,7 +378,7 @@ public abstract class AbstractSqlDatabase implements Database {
             try (PreparedStatement stmt = conn.prepareStatement("SELECT * FROM punishments WHERE id = ?")) {
                 stmt.setInt(1, id);
                 try (ResultSet rs = stmt.executeQuery()) {
-                    return rs.next() ? mapPunishment(rs) : null;
+                    return rs.next() ? mapPunishmentOrSkip(rs) : null;
                 }
             }
         });
@@ -545,19 +569,33 @@ public abstract class AbstractSqlDatabase implements Database {
     @Override
     public CompletableFuture<Integer> purgeOldPunishments(Instant cutoff, boolean keepActive) {
         return run("purgeOldPunishments", conn -> {
-            // Appeals reference punishments, so they have to go first regardless of whether
-            // the dialect declares ON DELETE CASCADE.
-            String appealSql = "DELETE FROM appeals WHERE punishment_id IN ("
-                    + "SELECT id FROM punishments WHERE issued_at < ?" + (keepActive ? " AND active = 0" : "") + ")";
-            try (PreparedStatement stmt = conn.prepareStatement(appealSql)) {
-                stmt.setLong(1, cutoff.toEpochMilli());
-                stmt.executeUpdate();
-            }
+            // One transaction: if the second statement failed, the appeals were gone while
+            // their punishments stayed.
+            boolean autoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try {
+                // Appeals reference punishments, so they have to go first regardless of whether
+                // the dialect declares ON DELETE CASCADE.
+                String appealSql = "DELETE FROM appeals WHERE punishment_id IN ("
+                        + "SELECT id FROM punishments WHERE issued_at < ?" + (keepActive ? " AND active = 0" : "") + ")";
+                try (PreparedStatement stmt = conn.prepareStatement(appealSql)) {
+                    stmt.setLong(1, cutoff.toEpochMilli());
+                    stmt.executeUpdate();
+                }
 
-            String sql = "DELETE FROM punishments WHERE issued_at < ?" + (keepActive ? " AND active = 0" : "");
-            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-                stmt.setLong(1, cutoff.toEpochMilli());
-                return stmt.executeUpdate();
+                int deleted;
+                String sql = "DELETE FROM punishments WHERE issued_at < ?" + (keepActive ? " AND active = 0" : "");
+                try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                    stmt.setLong(1, cutoff.toEpochMilli());
+                    deleted = stmt.executeUpdate();
+                }
+                conn.commit();
+                return deleted;
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(autoCommit);
             }
         });
     }
@@ -567,11 +605,13 @@ public abstract class AbstractSqlDatabase implements Database {
     /**
      * Grouped by UUID only. Including {@code staff_name} in the GROUP BY split a staff
      * member's record in two after a Minecraft name change, which made the single-staff
-     * query report only the first fragment and duplicated them in the leaderboard.
+     * query report only the first fragment and duplicated them in the leaderboard. The name
+     * shown is the one from the most recent punishment, not the alphabetically largest.
      */
     private static final String STATS_COLUMNS = """
             staff_uuid,
-            MAX(staff_name) AS staff_name,
+            (SELECT p2.staff_name FROM punishments p2 WHERE p2.staff_uuid = punishments.staff_uuid
+             ORDER BY p2.issued_at DESC, p2.id DESC LIMIT 1) AS staff_name,
             COUNT(*) AS total,
             SUM(CASE WHEN type IN ('BAN', 'TEMP_BAN', 'IP_BAN') THEN 1 ELSE 0 END) AS bans,
             SUM(CASE WHEN type = 'KICK' THEN 1 ELSE 0 END) AS kicks,
@@ -680,7 +720,7 @@ public abstract class AbstractSqlDatabase implements Database {
             try (PreparedStatement stmt = conn.prepareStatement("SELECT * FROM appeals WHERE id = ?")) {
                 stmt.setInt(1, id);
                 try (ResultSet rs = stmt.executeQuery()) {
-                    return rs.next() ? mapAppeal(rs) : null;
+                    return rs.next() ? mapAppealOrSkip(rs) : null;
                 }
             }
         });
@@ -695,7 +735,10 @@ public abstract class AbstractSqlDatabase implements Database {
                 stmt.setInt(1, limit);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        appeals.add(mapAppeal(rs));
+                        AppealRecord appeal = mapAppealOrSkip(rs);
+                        if (appeal != null) {
+                            appeals.add(appeal);
+                        }
                     }
                 }
             }
@@ -712,7 +755,10 @@ public abstract class AbstractSqlDatabase implements Database {
                 stmt.setString(1, playerUuid.toString());
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        appeals.add(mapAppeal(rs));
+                        AppealRecord appeal = mapAppealOrSkip(rs);
+                        if (appeal != null) {
+                            appeals.add(appeal);
+                        }
                     }
                 }
             }
@@ -772,7 +818,10 @@ public abstract class AbstractSqlDatabase implements Database {
         List<PunishmentRecord> records = new ArrayList<>();
         try (ResultSet rs = stmt.executeQuery()) {
             while (rs.next()) {
-                records.add(mapPunishment(rs));
+                PunishmentRecord record = mapPunishmentOrSkip(rs);
+                if (record != null) {
+                    records.add(record);
+                }
             }
         }
         return records;
@@ -792,6 +841,29 @@ public abstract class AbstractSqlDatabase implements Database {
         stat.setJails(rs.getInt("jails"));
         stat.setWarnings(rs.getInt("warnings"));
         return stat;
+    }
+
+    /**
+     * Maps one row, skipping it (with a warning) if it holds a value this version cannot
+     * read - an unknown type after a downgrade, a hand-edited UUID. One such row used to fail
+     * the whole query, which stopped every expiry and the mute cache from loading.
+     */
+    private PunishmentRecord mapPunishmentOrSkip(ResultSet rs) throws SQLException {
+        try {
+            return mapPunishment(rs);
+        } catch (IllegalArgumentException | NullPointerException e) {
+            logger.warn("Skipping unreadable punishment row #{}: {}", rs.getInt("id"), e.toString());
+            return null;
+        }
+    }
+
+    private AppealRecord mapAppealOrSkip(ResultSet rs) throws SQLException {
+        try {
+            return mapAppeal(rs);
+        } catch (IllegalArgumentException | NullPointerException e) {
+            logger.warn("Skipping unreadable appeal row #{}: {}", rs.getInt("id"), e.toString());
+            return null;
+        }
     }
 
     private PunishmentRecord mapPunishment(ResultSet rs) throws SQLException {

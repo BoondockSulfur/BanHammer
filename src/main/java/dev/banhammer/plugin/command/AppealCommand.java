@@ -8,7 +8,6 @@ import dev.banhammer.plugin.util.FoliaScheduler;
 import dev.banhammer.plugin.util.Settings;
 import dev.banhammer.plugin.util.ValidationUtil;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -17,7 +16,10 @@ import org.bukkit.entity.Player;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Lets a punished player contest their punishment.
@@ -32,6 +34,9 @@ import java.util.concurrent.CompletableFuture;
 public class AppealCommand implements CommandExecutor {
 
     private final BanHammerPlugin plugin;
+
+    /** Players whose appeal is currently being checked and saved. */
+    private final Set<UUID> submitting = ConcurrentHashMap.newKeySet();
 
     public AppealCommand(BanHammerPlugin plugin) {
         this.plugin = plugin;
@@ -80,9 +85,7 @@ public class AppealCommand implements CommandExecutor {
         ValidationUtil.ValidationResult validation =
                 ValidationUtil.validateAppeal(appealText, minLength, maxLength);
         if (!validation.isValid()) {
-            sender.sendMessage(prefixed(Component
-                    .text(validation.getErrorMessageOrDefault("Invalid appeal"))
-                    .color(NamedTextColor.RED)));
+            sender.sendMessage(prefixed(plugin.messages().validationError(validation, "Invalid appeal")));
             return true;
         }
 
@@ -91,7 +94,14 @@ public class AppealCommand implements CommandExecutor {
     }
 
     private void submitAppeal(Player player, Database database, Settings.Appeals settings, String appealText) {
-        plugin.getPunishmentManager().getActivePunishments(player.getUniqueId())
+        UUID uuid = player.getUniqueId();
+        // Check and save are separate asynchronous steps; without this guard a burst of
+        // /appeal commands passed the cooldown and limit checks before the first was saved.
+        if (!submitting.add(uuid)) {
+            return;
+        }
+
+        plugin.getPunishmentManager().getActivePunishments(uuid)
                 .thenCompose(punishments -> {
                     if (punishments.isEmpty()) {
                         reply(player, plugin.messages().appealNoActiveBan());
@@ -113,7 +123,8 @@ public class AppealCommand implements CommandExecutor {
                     plugin.getSLF4JLogger().error("Failed to submit appeal for {}", player.getName(), throwable);
                     reply(player, plugin.messages().errorOccurred());
                     return null;
-                });
+                })
+                .whenComplete((ignored, throwable) -> submitting.remove(uuid));
     }
 
     private CompletableFuture<Boolean> checkCooldownAndLimit(Player player, Database database,
@@ -161,9 +172,7 @@ public class AppealCommand implements CommandExecutor {
         // Walking the online-player list belongs on the main thread; this runs in a
         // database callback.
         FoliaScheduler.runGlobal(plugin, () -> {
-            Component message = plugin.messages().prefix()
-                    .append(Component.text("New appeal from " + playerName + " (ID: " + appealId + ")")
-                            .color(NamedTextColor.YELLOW));
+            Component message = plugin.messages().prefix().append(plugin.messages().appealNew(playerName, appealId));
 
             List<Player> staff = plugin.getServer().getOnlinePlayers().stream()
                     .filter(p -> p.hasPermission("banhammer.appeals"))

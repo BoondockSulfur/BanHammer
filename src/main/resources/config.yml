@@ -171,6 +171,8 @@ punishmentTypes:
     # Muted players cannot write on signs or in books either
     preventSigns: true
     preventBooks: true
+    # Aliases are resolved automatically: blocking "msg" also blocks /m, /pm, /whisper
+    # and whatever else the providing plugin registers for it.
     blockedCommands:
       - "msg"
       - "tell"
@@ -178,6 +180,8 @@ punishmentTypes:
       - "r"
       - "me"
       - "say"
+      - "teammsg"
+      - "mail"
 
   # Jail System
   jail:

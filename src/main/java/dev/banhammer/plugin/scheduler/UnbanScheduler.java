@@ -3,11 +3,11 @@ package dev.banhammer.plugin.scheduler;
 import dev.banhammer.plugin.BanHammerPlugin;
 import dev.banhammer.plugin.database.Database;
 import dev.banhammer.plugin.database.model.PunishmentRecord;
+import dev.banhammer.plugin.database.model.PunishmentType;
 import dev.banhammer.plugin.event.PlayerUnpunishedEvent;
 import dev.banhammer.plugin.integration.DiscordWebhook;
 import dev.banhammer.plugin.util.BanLists;
 import dev.banhammer.plugin.util.FoliaScheduler;
-import dev.banhammer.plugin.util.IPAnonymizer;
 import dev.banhammer.plugin.util.Settings;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
@@ -177,47 +177,54 @@ public class UnbanScheduler {
      */
     private void lift(PunishmentRecord record) {
         switch (record.getType()) {
+            // Only the entries this record created are removed. An unconditional pardon also
+            // wiped a permanent ban that was added for the same player while this temporary
+            // one was running (RCON, /minecraft:ban, another plugin, or a newer BanHammer ban).
             case TEMP_BAN, BAN -> FoliaScheduler.runGlobal(plugin, () -> {
-                BanLists.pardon(record.getVictimUuid(), record.getVictimName());
+                BanLists.pardonIfExpiring(record.getVictimUuid(), record.getVictimName(), record.getExpiresAt());
                 fireEvent(record);
                 notifyIfOnline(record);
             });
 
             case IP_BAN -> FoliaScheduler.runGlobal(plugin, () -> {
-                // Only the real IP can be pardoned. With anonymization enabled (the default)
-                // the stored value is masked or hashed; such bans expire through the ban
-                // list's own expiry date instead.
-                String storedIp = record.getVictimIp();
-                if (plugin.settings().privacy().anonymizationLevel() == IPAnonymizer.AnonymizationLevel.NONE
-                        && storedIp != null && IPAnonymizer.isLiteralIp(storedIp)) {
-                    BanLists.pardonIp(storedIp);
-                }
-                BanLists.pardon(record.getVictimUuid(), record.getVictimName());
+                plugin.getPunishmentManager().pardonIpBansOf(record, true);
+                BanLists.pardonIfExpiring(record.getVictimUuid(), record.getVictimName(), record.getExpiresAt());
                 fireEvent(record);
                 notifyIfOnline(record);
             });
 
             case TEMP_MUTE, MUTE -> {
-                plugin.getPunishmentManager().removeMuteFromCache(record.getVictimUuid());
+                plugin.getPunishmentManager().removeMuteFromCache(record.getVictimUuid(), record.getId());
                 FoliaScheduler.runGlobal(plugin, () -> {
                     fireEvent(record);
                     notifyIfOnline(record);
                 });
             }
 
-            case JAIL -> {
-                Player jailed = Bukkit.getPlayer(record.getVictimUuid());
-                if (jailed != null && jailed.isOnline()) {
-                    FoliaScheduler.runOnEntity(plugin, jailed,
-                            () -> plugin.getJailManager().releasePlayer(jailed),
-                            () -> plugin.getJailManager().releasePlayerByUUID(record.getVictimUuid()));
-                } else {
-                    plugin.getJailManager().releasePlayerByUUID(record.getVictimUuid());
-                }
-                plugin.getSLF4JLogger().info("Automatically released {} from jail (punishment expired)",
-                        record.getVictimName());
-                FoliaScheduler.runGlobal(plugin, () -> fireEvent(record));
-            }
+            case JAIL -> database.getActivePunishmentsByType(record.getVictimUuid(), PunishmentType.JAIL)
+                    .thenAccept(stillActive -> {
+                        // A new jail issued while this one was expiring must not be released.
+                        if (!stillActive.isEmpty()) {
+                            FoliaScheduler.runGlobal(plugin, () -> fireEvent(record));
+                            return;
+                        }
+                        Player jailed = Bukkit.getPlayer(record.getVictimUuid());
+                        if (jailed != null && jailed.isOnline()) {
+                            FoliaScheduler.runOnEntity(plugin, jailed,
+                                    () -> plugin.getJailManager().releasePlayer(jailed),
+                                    () -> plugin.getJailManager().releasePlayerByUUID(record.getVictimUuid()));
+                        } else {
+                            plugin.getJailManager().releasePlayerByUUID(record.getVictimUuid());
+                        }
+                        plugin.getSLF4JLogger().info("Automatically released {} from jail (punishment expired)",
+                                record.getVictimName());
+                        FoliaScheduler.runGlobal(plugin, () -> fireEvent(record));
+                    })
+                    .exceptionally(throwable -> {
+                        plugin.getSLF4JLogger().error("Failed to release {} after jail #{} expired",
+                                record.getVictimName(), record.getId(), throwable);
+                        return null;
+                    });
 
             default -> {
                 // WARNING never expires (it is stored inactive), so reaching here means a new

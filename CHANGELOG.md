@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### 🐛 Bug fixes
+
+- **Expiring temporary bans removed unrelated bans.** On expiry the scheduler pardoned the
+  account unconditionally, which also lifted a permanent ban added in the meantime through
+  `/minecraft:ban`, RCON, another plugin or a newer BanHammer ban. Only the ban list entry with
+  the record's own expiry is removed now.
+- **Approving an appeal lifted the wrong punishment.** `/bh approve` unbanned by player name and
+  ignored which punishment was appealed, so appeals against mutes and jails had no effect. The
+  appealed record is now lifted according to its type.
+- **Offline `/unjail` with Essentials left the player jailed.** Releases of offline players are
+  now kept as pending and carried out on the next join, including the Essentials jail flag.
+- **Released players ended up in the jail cell.** The return location was kept in memory only
+  and was lost after a restart or a few minutes offline. Jail state now persists in
+  `jails.yml`; without a usable return location players are sent to the world spawn.
+- **Jails were lost on restart without a database.** Covered by `jails.yml` as well.
+- **A failed re-jail on join left the player invulnerable but free.** The enforcement is
+  dropped and the failure is logged. The jail world is resolved on use, so a world loaded later
+  by Multiverse no longer disables the jail.
+- **Folia: scheduled tasks were never cancelled.** Every `/bh reload` left a scheduler task
+  running against the closed database.
+- **Folia: ban list and inventory access from the wrong thread.** Hammer bans wrote the ban list
+  from the staff member's region thread, and `/bh give` modified another player's inventory
+  from the sender's thread.
+- **The hammer bypassed the punishment pipeline without a database.** No `PlayerPunishEvent`,
+  no audit log, no Discord message, and IP-ban presets silently became account bans.
+- **IP bans could not be lifted with anonymized IPs.** The entry is now identified by issuer,
+  date and the anonymized address.
+- **Muted players could talk through command aliases** (`/m`, `/pm`, `/whisper`, `/reply`, …) and
+  through plugins listening to the legacy chat event.
+- **A new mute or jail could be lifted by the expiry of the previous one.**
+- **All mutes were briefly lifted on `/bh reload`.**
+- **Blocked words with umlauts were never filtered** (`\b` is ASCII-only since JDK 19).
+- **`/appeal` spam could bypass cooldown and limit.**
+- **`/jail <player> <time> <reason>` failed with Essentials** when no cell was given.
+- **RCON lost the replies of `/mute`, `/jail` and `/warn`.**
+- **Discord showed "Permanent" for kicks and warnings.**
+- **The update check announced alpha and beta builds.**
+- **Database:** work submitted during shutdown no longer throws on the calling thread; one
+  unreadable row no longer fails a whole query (which stopped all expiries); retention purge
+  runs in a transaction; MySQL databases migrated from older versions get `TEXT` columns and
+  the missing indexes; statistics show the staff member's current name.
+
+### 🌐 Localization
+
+- Remaining hard-coded English texts (disabled systems, validation errors, appeal status and
+  staff notification) moved to the language files.
+
+---
+
 ## [4.1.0] - 2026-08-08
 
 Result of a full audit of the code base. Nothing in this release adds a new feature for its

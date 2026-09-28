@@ -488,6 +488,44 @@ public final class Messages {
         return msg("jailFailed", "<red>Der Spieler konnte nicht eingesperrt werden - siehe Server-Log.</red>");
     }
 
+    public Component muteSystemDisabled() {
+        return msg("muteSystemDisabled", "<red>Das Mute-System ist in der config.yml deaktiviert.</red>");
+    }
+
+    public Component jailSystemDisabled() {
+        return msg("jailSystemDisabled", "<red>Das Jail-System ist in der config.yml deaktiviert.</red>");
+    }
+
+    public Component warnSystemDisabled() {
+        return msg("warnSystemDisabled", "<red>Das Verwarnungssystem ist in der config.yml deaktiviert.</red>");
+    }
+
+    /** Localized appeal status for player-facing texts. */
+    public String appealStatus(boolean approved) {
+        return approved
+                ? raw("appealStatusApproved", "genehmigt")
+                : raw("appealStatusDenied", "abgelehnt");
+    }
+
+    public Component appealNew(String player, int id) {
+        return render("appealNew", raw("appealNew", "<yellow>Neuer Einspruch von {player} (ID: {id})</yellow>")
+                .replace("{player}", esc(player))
+                .replace("{id}", String.valueOf(id)));
+    }
+
+    /**
+     * Localized text for a failed validation. Falls back to the result's own English text
+     * for checks that have no message key.
+     */
+    public Component validationError(ValidationUtil.ValidationResult result, String fallback) {
+        String key = result.getErrorKey();
+        if (key == null) {
+            return mm.deserialize("<red>" + esc(result.getErrorMessageOrDefault(fallback)) + "</red>");
+        }
+        return render(key, raw(key, "<red>" + esc(result.getErrorMessageOrDefault(fallback)) + "</red>")
+                .replace("{n}", String.valueOf(result.getLimit())));
+    }
+
     // Warning Messages
     public Component warnedMessage(String reason) {
         return msg("warnedMessage", "<yellow>Du wurdest verwarnt!\nGrund: {reason}</yellow>", "{reason}", reason);

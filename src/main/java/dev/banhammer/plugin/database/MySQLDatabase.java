@@ -98,6 +98,11 @@ public class MySQLDatabase extends AbstractSqlDatabase {
     }
 
     @Override
+    protected String freeTextType() {
+        return "TEXT";
+    }
+
+    @Override
     protected List<String> schemaStatements() {
         return List.of(
                 """
@@ -147,17 +152,64 @@ public class MySQLDatabase extends AbstractSqlDatabase {
         );
     }
 
+    @Override
+    protected void applyDialectMigrations(java.sql.Connection conn, int from) throws java.sql.SQLException {
+        if (from < 2) {
+            widenNameColumns(conn);
+        }
+        if (from < 3) {
+            alignFreeTextColumns(conn);
+            ensureIndexes(conn);
+        }
+    }
+
+    /**
+     * Older migrations added the free-text columns as {@code VARCHAR(255)}, while a fresh
+     * schema has {@code TEXT}: a long unban reason or appeal response then failed with "Data
+     * too long" after the in-game action had already happened.
+     */
+    private void alignFreeTextColumns(java.sql.Connection conn) throws java.sql.SQLException {
+        try (java.sql.Statement stmt = conn.createStatement()) {
+            stmt.execute("ALTER TABLE punishments MODIFY COLUMN unban_reason TEXT");
+            stmt.execute("ALTER TABLE appeals MODIFY COLUMN review_response TEXT");
+        }
+    }
+
+    /**
+     * Indexes are part of {@code CREATE TABLE} here, so tables created by an older version
+     * never received the ones added later. Adds whatever is missing.
+     */
+    private void ensureIndexes(java.sql.Connection conn) throws java.sql.SQLException {
+        ensureIndex(conn, "punishments", "idx_victim_issued", "victim_uuid, issued_at");
+        ensureIndex(conn, "punishments", "idx_staff_issued", "staff_uuid, issued_at");
+        ensureIndex(conn, "punishments", "idx_type_active", "type, active");
+        ensureIndex(conn, "punishments", "idx_active_expires", "active, expires_at");
+        ensureIndex(conn, "punishments", "idx_victim_type_active", "victim_uuid, type, active");
+        ensureIndex(conn, "appeals", "idx_appeal_player_uuid", "player_uuid");
+        ensureIndex(conn, "appeals", "idx_appeal_status", "status, submitted_at");
+    }
+
+    private void ensureIndex(java.sql.Connection conn, String table, String index, String columns)
+            throws java.sql.SQLException {
+        try (java.sql.ResultSet rs = conn.getMetaData().getIndexInfo(conn.getCatalog(), null, table, false, true)) {
+            while (rs.next()) {
+                if (index.equalsIgnoreCase(rs.getString("INDEX_NAME"))) {
+                    return;
+                }
+            }
+        }
+        logger.info("Adding missing index {} on {}", index, table);
+        try (java.sql.Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE INDEX " + index + " ON " + table + " (" + columns + ")");
+        }
+    }
+
     /**
      * Widens the name columns on databases created before schema version 2, where
      * {@code VARCHAR(16)} made MySQL reject Geyser/Bedrock names outright (with
      * "Data too long for column") while SQLite accepted the very same punishment.
      */
-    @Override
-    protected void applyDialectMigrations(java.sql.Connection conn, int from) throws java.sql.SQLException {
-        if (from >= 2) {
-            return;
-        }
-
+    private void widenNameColumns(java.sql.Connection conn) throws java.sql.SQLException {
         logger.info("Widening name columns to {} for Bedrock/Geyser compatibility", NAME_TYPE);
         try (java.sql.Statement stmt = conn.createStatement()) {
             stmt.execute("ALTER TABLE punishments MODIFY COLUMN victim_name " + NAME_TYPE + " NOT NULL");

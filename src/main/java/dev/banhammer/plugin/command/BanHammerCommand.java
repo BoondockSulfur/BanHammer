@@ -153,14 +153,17 @@ public class BanHammerCommand implements TabExecutor {
             return;
         }
 
-        // addItem returns whatever did not fit; ignoring it reported success while the hammer
-        // silently never existed.
-        Map<Integer, ItemStack> leftover = target.getInventory().addItem(ItemFactory.createHammer(plugin));
-        if (leftover.isEmpty()) {
-            reply(sender, plugin.messages().given(target.getName()));
-        } else {
-            reply(sender, prefixed(plugin.messages().inventoryFull(target.getName())));
-        }
+        // The inventory belongs to the target's region thread (Folia), not the sender's.
+        FoliaScheduler.runOnEntity(plugin, target, () -> {
+            // addItem returns whatever did not fit; ignoring it reported success while the
+            // hammer silently never existed.
+            Map<Integer, ItemStack> leftover = target.getInventory().addItem(ItemFactory.createHammer(plugin));
+            if (leftover.isEmpty()) {
+                reply(sender, plugin.messages().given(target.getName()));
+            } else {
+                reply(sender, prefixed(plugin.messages().inventoryFull(target.getName())));
+            }
+        });
     }
 
     private void handleHistory(CommandSender sender, String[] args) {
@@ -440,11 +443,19 @@ public class BanHammerCommand implements TabExecutor {
                         : plugin.messages().appealDenied(appealId));
 
                 if (approved) {
+                    // Lift the punishment the appeal was about - not whatever ban the player
+                    // name currently has.
                     plugin.getPunishmentManager()
-                            .unbanPlayer(staff, appeal.getPlayerName(), "Appeal approved")
+                            .liftPunishment(staff, appeal.getPunishmentId(), "Appeal approved")
+                            .thenAccept(lifted -> {
+                                if (!lifted) {
+                                    plugin.getSLF4JLogger().info("Appeal #{} approved; punishment #{} was no "
+                                            + "longer active", appealId, appeal.getPunishmentId());
+                                }
+                            })
                             .exceptionally(throwable -> {
                                 fail(staff, "unban after appeal " + appealId, throwable);
-                                return false;
+                                return null;
                             });
                 }
 
@@ -462,7 +473,7 @@ public class BanHammerCommand implements TabExecutor {
         FoliaScheduler.runGlobal(plugin, () -> {
             Player target = Bukkit.getPlayer(appeal.getPlayerUuid());
             if (target != null && target.isOnline()) {
-                target.sendMessage(plugin.messages().appealNotification(approved ? "APPROVED" : "DENIED"));
+                target.sendMessage(plugin.messages().appealNotification(plugin.messages().appealStatus(approved)));
                 target.sendMessage(plugin.messages().appealResponse(response));
             }
         });
@@ -486,7 +497,9 @@ public class BanHammerCommand implements TabExecutor {
             Subcommand sub = Subcommand.byLabel(args[0]);
             if (sub != null && sub.takesPlayerName && sender.hasPermission(sub.permission)) {
                 for (Player player : Bukkit.getOnlinePlayers()) {
-                    out.add(player.getName());
+                    if (!(sender instanceof Player viewer) || viewer.canSee(player)) {
+                        out.add(player.getName());
+                    }
                 }
             }
         }

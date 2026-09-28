@@ -10,24 +10,78 @@ import dev.banhammer.plugin.util.FoliaScheduler;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Manages jailed players and jail locations.
  *
+ * <h2>Persistence</h2>
+ * Jail state (who is jailed, until when, where to return them, and releases that still have
+ * to be carried out) is written to {@code jails.yml}. Without it the return location was lost
+ * after a restart or once the player had been offline for a while, and re-jailing on join then
+ * stored the jail cell itself as the return location. Releases of offline players are kept as
+ * pending and carried out on the next join, including the Essentials jail flag.
+ *
  * @since 3.0.0
  */
 public final class JailManager {
+
+    private static final String STORE_FILE = "jails.yml";
+
+    /**
+     * A location stored by world name. Resolved on use, because the world may not be loaded
+     * yet when the plugin starts (Multiverse) and {@link Location} only holds a weak world
+     * reference.
+     */
+    private record SavedLocation(String world, double x, double y, double z, float yaw, float pitch) {
+
+        static SavedLocation of(Location location) {
+            return new SavedLocation(location.getWorld().getName(), location.getX(), location.getY(),
+                    location.getZ(), location.getYaw(), location.getPitch());
+        }
+
+        Location resolve() {
+            var loaded = world == null ? null : Bukkit.getWorld(world);
+            return loaded == null ? null : new Location(loaded, x, y, z, yaw, pitch);
+        }
+
+        void writeTo(ConfigurationSection section) {
+            section.set("world", world);
+            section.set("x", x);
+            section.set("y", y);
+            section.set("z", z);
+            section.set("yaw", yaw);
+            section.set("pitch", pitch);
+        }
+
+        static SavedLocation readFrom(ConfigurationSection section) {
+            if (section == null || section.getString("world") == null) {
+                return null;
+            }
+            return new SavedLocation(section.getString("world"), section.getDouble("x"),
+                    section.getDouble("y"), section.getDouble("z"),
+                    (float) section.getDouble("yaw", 0.0), (float) section.getDouble("pitch", 0.0));
+        }
+    }
 
     private final BanHammerPlugin plugin;
     private final EssentialsJailIntegration essentialsJail;
@@ -36,20 +90,33 @@ public final class JailManager {
     private final Set<UUID> jailedPlayers = ConcurrentHashMap.newKeySet();
 
     /** Where to put a player back when they are released. */
-    private final Map<UUID, Location> returnLocations = new ConcurrentHashMap<>();
+    private final Map<UUID, SavedLocation> returnLocations = new ConcurrentHashMap<>();
 
     /** Expiry timestamps (epoch millis) for temporary jails. */
     private final Map<UUID, Long> jailExpiry = new ConcurrentHashMap<>();
 
-    private volatile Location jailLocation;
+    /** Players released while offline; the release is carried out on their next join. */
+    private final Set<UUID> pendingReleases = ConcurrentHashMap.newKeySet();
+
+    private final File storeFile;
+
+    /** Serializes file writes so an older snapshot can never overwrite a newer one. */
+    private final ExecutorService fileWriter = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "BanHammer-JailStore");
+        thread.setDaemon(true);
+        return thread;
+    });
+
+    private volatile SavedLocation jailLocation;
     private volatile JailListener jailListener;
-    private Object cleanupTask;
     private Object expiryTask;
 
     public JailManager(BanHammerPlugin plugin, EssentialsJailIntegration essentialsJail) {
         this.plugin = plugin;
         this.essentialsJail = essentialsJail;
+        this.storeFile = new File(plugin.getDataFolder(), STORE_FILE);
         loadJailLocation();
+        loadStore();
     }
 
     /**
@@ -60,7 +127,6 @@ public final class JailManager {
      * {@code -Xlint:this-escape} warns about.
      */
     public void start() {
-        startCleanupTask();
         startExpiryTask();
     }
 
@@ -85,26 +151,114 @@ public final class JailManager {
     private void loadJailLocation() {
         ConfigurationSection jailConfig = plugin.getConfig().getConfigurationSection("punishmentTypes.jail.location");
 
-        if (jailConfig == null) {
+        SavedLocation saved = SavedLocation.readFrom(jailConfig);
+        jailLocation = saved;
+        if (saved == null) {
             plugin.getSLF4JLogger().warn("Jail location not configured. Use /setjail to set it.");
-            jailLocation = null;
+        } else if (saved.resolve() == null) {
+            plugin.getSLF4JLogger().warn("Jail world '{}' is not loaded yet - the jail location is resolved "
+                    + "again each time it is needed.", saved.world());
+        } else {
+            plugin.getSLF4JLogger().info("Jail location loaded: {} {},{},{}",
+                    saved.world(), saved.x(), saved.y(), saved.z());
+        }
+    }
+
+    // ==================== Persistence ====================
+
+    private void loadStore() {
+        if (!storeFile.isFile()) {
             return;
         }
+        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(storeFile);
+        ConfigurationSection players = yaml.getConfigurationSection("players");
+        if (players == null) {
+            return;
+        }
+        for (String key : players.getKeys(false)) {
+            ConfigurationSection entry = players.getConfigurationSection(key);
+            UUID uuid;
+            try {
+                uuid = UUID.fromString(key);
+            } catch (IllegalArgumentException e) {
+                plugin.getSLF4JLogger().warn("Ignoring invalid entry '{}' in {}", key, STORE_FILE);
+                continue;
+            }
+            if (entry == null) {
+                continue;
+            }
+            if (entry.getBoolean("jailed")) {
+                jailedPlayers.add(uuid);
+            }
+            if (entry.getBoolean("pendingRelease")) {
+                pendingReleases.add(uuid);
+            }
+            if (entry.isLong("expiry") || entry.isInt("expiry")) {
+                jailExpiry.put(uuid, entry.getLong("expiry"));
+            }
+            SavedLocation back = SavedLocation.readFrom(entry.getConfigurationSection("return"));
+            if (back != null) {
+                returnLocations.put(uuid, back);
+            }
+        }
+    }
 
-        String worldName = jailConfig.getString("world");
-        double x = jailConfig.getDouble("x");
-        double y = jailConfig.getDouble("y");
-        double z = jailConfig.getDouble("z");
-        float yaw = (float) jailConfig.getDouble("yaw", 0.0);
-        float pitch = (float) jailConfig.getDouble("pitch", 0.0);
+    private String snapshot() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        Set<UUID> all = ConcurrentHashMap.newKeySet();
+        all.addAll(jailedPlayers);
+        all.addAll(pendingReleases);
+        all.addAll(returnLocations.keySet());
+        all.addAll(jailExpiry.keySet());
+        for (UUID uuid : all) {
+            ConfigurationSection entry = yaml.createSection("players." + uuid);
+            if (jailedPlayers.contains(uuid)) {
+                entry.set("jailed", true);
+            }
+            if (pendingReleases.contains(uuid)) {
+                entry.set("pendingRelease", true);
+            }
+            Long expiry = jailExpiry.get(uuid);
+            if (expiry != null) {
+                entry.set("expiry", expiry);
+            }
+            SavedLocation back = returnLocations.get(uuid);
+            if (back != null) {
+                back.writeTo(entry.createSection("return"));
+            }
+        }
+        return yaml.saveToString();
+    }
 
-        if (worldName != null && Bukkit.getWorld(worldName) != null) {
-            jailLocation = new Location(Bukkit.getWorld(worldName), x, y, z, yaw, pitch);
-            plugin.getSLF4JLogger().info("Jail location loaded: {} {},{},{}", worldName, x, y, z);
-        } else {
-            jailLocation = null;
-            plugin.getSLF4JLogger().warn("Jail world '{}' not found - the built-in jail is unavailable "
-                    + "until /setjail is used again.", worldName);
+    /**
+     * Writes the current state to disk off the calling thread. The snapshot is taken now, so
+     * writes land in the order the changes were made.
+     */
+    private void persist() {
+        String data = snapshot();
+        try {
+            fileWriter.execute(() -> writeStore(data));
+        } catch (RejectedExecutionException shuttingDown) {
+            writeStore(data);
+        }
+    }
+
+    private void writeStore(String data) {
+        writeAtomically(storeFile, data);
+    }
+
+    private void writeAtomically(File target, String data) {
+        try {
+            File parent = target.getParentFile();
+            if (parent != null) {
+                Files.createDirectories(parent.toPath());
+            }
+            File temp = new File(parent, target.getName() + ".tmp");
+            Files.writeString(temp.toPath(), data, StandardCharsets.UTF_8);
+            Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException e) {
+            plugin.getSLF4JLogger().error("Failed to write {}", target.getName(), e);
         }
     }
 
@@ -145,6 +299,7 @@ public final class JailManager {
         } else {
             jailExpiry.remove(player.getUniqueId());
         }
+        persist();
         return true;
     }
 
@@ -174,10 +329,11 @@ public final class JailManager {
             // putIfAbsent keeps the ORIGINAL pre-jail location: when a jail is re-applied
             // (relog or restart restore) the player already stands in the jail, and a plain
             // put would overwrite the real return location with the jail itself.
-            Location previous = returnLocations.putIfAbsent(uuid, player.getLocation().clone());
+            SavedLocation previous = returnLocations.putIfAbsent(uuid, SavedLocation.of(player.getLocation()));
             boolean weStoredIt = previous == null;
 
             if (essentialsJail.jailPlayer(player, cellName, duration)) {
+                pendingReleases.remove(uuid);
                 jailedPlayers.add(uuid);
                 addToEnforcementCache(uuid);
                 player.sendMessage(plugin.messages().jailed());
@@ -198,18 +354,21 @@ public final class JailManager {
             return false;
         }
 
-        if (jailLocation == null) {
-            plugin.getSLF4JLogger().warn("Cannot jail player - jail location not set and Essentials not available");
+        Location jail = getJailLocation();
+        if (jail == null) {
+            plugin.getSLF4JLogger().warn("Cannot jail player - jail location not set (or its world is not loaded) "
+                    + "and Essentials not available");
             return false;
         }
 
         plugin.getSLF4JLogger().debug("Jailing {} using the built-in jail system", player.getName());
 
-        returnLocations.putIfAbsent(uuid, player.getLocation().clone());
+        returnLocations.putIfAbsent(uuid, SavedLocation.of(player.getLocation()));
+        pendingReleases.remove(uuid);
         jailedPlayers.add(uuid);
         addToEnforcementCache(uuid);
 
-        FoliaScheduler.teleportAsync(plugin, player, jailLocation);
+        FoliaScheduler.teleportAsync(plugin, player, jail);
         player.sendMessage(plugin.messages().jailed());
         return true;
     }
@@ -217,32 +376,40 @@ public final class JailManager {
     // ==================== Releasing ====================
 
     /**
-     * Releases a player from jail.
+     * Releases a player from jail. Must run on the player's region thread.
+     *
+     * <p>Also acts when BanHammer's own state has already been cleared - by a release while
+     * the player was offline, or after a restart - as long as Essentials still holds the
+     * player. Previously such a release was a no-op and Essentials re-jailed the player on
+     * every join.
      */
     public void releasePlayer(Player player) {
         UUID uuid = player.getUniqueId();
 
-        if (!jailedPlayers.contains(uuid)) {
+        boolean tracked = jailedPlayers.remove(uuid);
+        boolean pending = pendingReleases.remove(uuid);
+        boolean essentialsJailed = essentialsJail != null && essentialsJail.isAvailable()
+                && essentialsJail.isJailed(player);
+
+        if (!tracked && !pending && !essentialsJailed) {
             return;
         }
 
         // Clear enforcement first so the teleport home is not cancelled by our own listener.
         removeFromEnforcementCache(uuid);
 
-        Location returnLoc = returnLocations.remove(uuid);
-        jailedPlayers.remove(uuid);
+        SavedLocation returnLoc = returnLocations.remove(uuid);
         jailExpiry.remove(uuid);
+        persist();
 
-        if (essentialsJail != null && essentialsJail.isAvailable() && essentialsJail.isJailed(player)) {
+        if (essentialsJailed) {
             plugin.getSLF4JLogger().debug("Releasing {} from Essentials jail...", player.getName());
             if (essentialsJail.releasePlayer(player)) {
-                teleportHome(player, returnLoc);
-                player.sendMessage(plugin.messages().unjailed());
                 plugin.getSLF4JLogger().info("Released {} from Essentials jail", player.getName());
-                return;
+            } else {
+                plugin.getSLF4JLogger().warn("Failed to release {} from Essentials; use Essentials' /unjail",
+                        player.getName());
             }
-            plugin.getSLF4JLogger().warn("Failed to release {} from Essentials, falling back to the built-in system",
-                    player.getName());
         }
 
         teleportHome(player, returnLoc);
@@ -252,13 +419,15 @@ public final class JailManager {
     /**
      * Teleports a released player back where they came from.
      */
-    private void teleportHome(Player player, Location returnLoc) {
-        if (!isUsable(returnLoc)) {
-            plugin.getSLF4JLogger().warn("No usable return location for {} - leaving them where they are. "
-                    + "The world they were jailed from may have been unloaded.", player.getName());
-            return;
+    private void teleportHome(Player player, SavedLocation returnLoc) {
+        Location target = returnLoc != null ? returnLoc.resolve() : null;
+        if (!isUsable(target)) {
+            // Never leave a released player standing in the closed cell.
+            target = player.getWorld().getSpawnLocation();
+            plugin.getSLF4JLogger().warn("No usable return location for {} - sending them to the world spawn.",
+                    player.getName());
         }
-        FoliaScheduler.teleportAsync(plugin, player, returnLoc);
+        FoliaScheduler.teleportAsync(plugin, player, target);
     }
 
     /**
@@ -282,13 +451,16 @@ public final class JailManager {
     }
 
     /**
-     * Releases a player from jail by UUID (for offline players).
+     * Releases an offline player. The return location is kept and the release is carried
+     * out on the next join - including lifting the Essentials jail flag, which can only be
+     * changed for an online player through the hook.
      */
     public void releasePlayerByUUID(UUID uuid) {
         jailedPlayers.remove(uuid);
-        returnLocations.remove(uuid);
         jailExpiry.remove(uuid);
+        pendingReleases.add(uuid);
         removeFromEnforcementCache(uuid);
+        persist();
     }
 
     // ==================== Queries and enforcement ====================
@@ -322,7 +494,7 @@ public final class JailManager {
             return;
         }
 
-        Location jail = jailLocation;
+        Location jail = getJailLocation();
         if (!isUsable(jail)) {
             return;
         }
@@ -341,27 +513,35 @@ public final class JailManager {
      * Sets the jail location and persists it.
      */
     public void setJailLocation(Location location) {
-        this.jailLocation = location;
+        this.jailLocation = SavedLocation.of(location);
 
         ConfigurationSection jailConfig = plugin.getConfig().createSection("punishmentTypes.jail.location");
-        jailConfig.set("world", location.getWorld().getName());
-        jailConfig.set("x", location.getX());
-        jailConfig.set("y", location.getY());
-        jailConfig.set("z", location.getZ());
-        jailConfig.set("yaw", location.getYaw());
-        jailConfig.set("pitch", location.getPitch());
+        jailLocation.writeTo(jailConfig);
 
-        // Written off the main thread; saveConfig() serializes the whole file.
-        FoliaScheduler.runAsync(plugin, plugin::saveConfig);
+        // Serialized here, written on the writer thread: saveConfig() on another thread would
+        // read the live configuration while a reload may be replacing it.
+        String data = plugin.getConfig().saveToString();
+        File configFile = new File(plugin.getDataFolder(), "config.yml");
+        try {
+            fileWriter.execute(() -> writeAtomically(configFile, data));
+        } catch (RejectedExecutionException shuttingDown) {
+            writeAtomically(configFile, data);
+        }
+
+        // The auto-created Essentials jail was a copy of the old location; keep it in sync.
+        if (essentialsJail != null) {
+            essentialsJail.updateBanHammerJail(location);
+        }
 
         plugin.getSLF4JLogger().info("Jail location set to: {}", location);
     }
 
     /**
-     * @return the current jail location, or {@code null} if not set
+     * @return the current jail location, or {@code null} if not set or its world is not loaded
      */
     public Location getJailLocation() {
-        return jailLocation;
+        SavedLocation saved = jailLocation;
+        return saved != null ? saved.resolve() : null;
     }
 
     /**
@@ -420,7 +600,8 @@ public final class JailManager {
     }
 
     /**
-     * Restores a player's jail status when they (re)join.
+     * Restores a player's jail status when they (re)join, and carries out releases that
+     * happened while they were offline.
      *
      * <p>The player is added to the enforcement cache immediately and only removed again if
      * the lookup says they are not jailed. Waiting for the database first left a window -
@@ -432,16 +613,18 @@ public final class JailManager {
 
         Database database = plugin.getDatabase();
         if (database == null) {
-            // No database: memory is the source of truth.
+            // No database: jails.yml is the source of truth.
             if (!jailedPlayers.contains(uuid)) {
+                releaseIfPending(player);
                 return;
             }
             Long expiry = jailExpiry.get(uuid);
             if (expiry != null && expiry <= System.currentTimeMillis()) {
-                releasePlayerByUUID(uuid);
+                release(player);
                 return;
             }
-            reapply(player, remainingFrom(jailExpiry.get(uuid)));
+            addToEnforcementCache(uuid);
+            reapply(player, remainingFrom(expiry));
             return;
         }
 
@@ -456,12 +639,16 @@ public final class JailManager {
                     .orElse(null);
 
             if (active == null) {
-                if (!jailedPlayers.contains(uuid)) {
+                // The database is authoritative: whatever is left over locally is released.
+                if (jailedPlayers.contains(uuid) || pendingReleases.contains(uuid)) {
+                    release(player);
+                } else {
                     removeFromEnforcementCache(uuid);
                 }
                 return;
             }
 
+            addToEnforcementCache(uuid);
             Duration remaining = active.getExpiresAt() == null ? null : Duration.between(now, active.getExpiresAt());
             reapply(player, remaining);
         }).exceptionally(throwable -> {
@@ -471,6 +658,20 @@ public final class JailManager {
                 removeFromEnforcementCache(uuid);
             }
             return null;
+        });
+    }
+
+    private void releaseIfPending(Player player) {
+        if (pendingReleases.contains(player.getUniqueId())) {
+            release(player);
+        }
+    }
+
+    private void release(Player player) {
+        FoliaScheduler.runOnEntity(plugin, player, () -> {
+            if (player.isOnline()) {
+                releasePlayer(player);
+            }
         });
     }
 
@@ -484,8 +685,15 @@ public final class JailManager {
 
     private void reapply(Player player, Duration remaining) {
         FoliaScheduler.runOnEntity(plugin, player, () -> {
-            if (player.isOnline()) {
-                jailPlayer(player, remaining);
+            if (!player.isOnline()) {
+                return;
+            }
+            if (!jailPlayer(player, remaining)) {
+                // Leaving the player in the enforcement cache without a jail would make them
+                // invulnerable and unable to teleport while walking around freely.
+                removeFromEnforcementCache(player.getUniqueId());
+                plugin.getSLF4JLogger().error("Could not re-jail {} - the jail location or its world is "
+                        + "unavailable. The player is NOT jailed right now.", player.getName());
             }
         });
     }
@@ -507,52 +715,6 @@ public final class JailManager {
     }
 
     // ==================== Background tasks ====================
-
-    private void startCleanupTask() {
-        cleanupTask = FoliaScheduler.runAsyncRepeating(plugin, () -> {
-            int removed = cleanupOfflineJails();
-            if (removed > 0) {
-                plugin.getSLF4JLogger().debug("Cleaned up {} offline jailed player(s) from memory", removed);
-            }
-        }, 6000L, 6000L);
-    }
-
-    /**
-     * Frees memory held for offline jailed players.
-     *
-     * <p>With a database the jail persists there and is restored on rejoin, so entries can be
-     * dropped. Without one, memory <em>is</em> the record, so only expired temporary jails go.
-     *
-     * @return number of entries removed
-     */
-    public int cleanupOfflineJails() {
-        int removed = 0;
-        boolean hasDatabase = plugin.getDatabase() != null;
-        long now = System.currentTimeMillis();
-
-        for (UUID uuid : List.copyOf(jailedPlayers)) {
-            Player player = Bukkit.getPlayer(uuid);
-            if (player != null && player.isOnline()) {
-                continue;
-            }
-
-            if (hasDatabase) {
-                jailedPlayers.remove(uuid);
-                returnLocations.remove(uuid);
-                jailExpiry.remove(uuid);
-                removeFromEnforcementCache(uuid);
-                removed++;
-            } else {
-                Long expiry = jailExpiry.get(uuid);
-                if (expiry != null && expiry <= now) {
-                    releasePlayerByUUID(uuid);
-                    removed++;
-                }
-            }
-        }
-
-        return removed;
-    }
 
     private void startExpiryTask() {
         expiryTask = FoliaScheduler.runAsyncRepeating(plugin, this::checkInMemoryExpiry, 20L, 20L);
@@ -588,12 +750,23 @@ public final class JailManager {
      * Stops the background tasks and clears all state (called on plugin disable).
      */
     public void shutdown() {
-        FoliaScheduler.cancelTask(cleanupTask);
         FoliaScheduler.cancelTask(expiryTask);
-        cleanupTask = null;
         expiryTask = null;
 
+        // Flush the final state before the maps are cleared.
+        String data = snapshot();
+        fileWriter.shutdown();
+        try {
+            if (!fileWriter.awaitTermination(5, TimeUnit.SECONDS)) {
+                plugin.getSLF4JLogger().warn("Jail store writer did not finish in time");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        writeStore(data);
+
         jailedPlayers.clear();
+        pendingReleases.clear();
         returnLocations.clear();
         jailExpiry.clear();
         jailListener = null;

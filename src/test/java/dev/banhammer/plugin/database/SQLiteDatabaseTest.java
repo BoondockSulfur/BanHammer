@@ -190,7 +190,45 @@ class SQLiteDatabaseTest {
                 "a deactivated record must not be picked up again");
     }
 
+    @Test
+    @DisplayName("an unreadable row is skipped instead of failing the whole expiry query")
+    void unreadableRowDoesNotBlockExpiry() throws SQLException {
+        int expired = database.savePunishment(
+                punishment(PunishmentType.TEMP_BAN, Instant.now().minusSeconds(60))).join();
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + tempDir.resolve("test.db"));
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("INSERT INTO punishments "
+                    + "(victim_uuid, victim_name, staff_uuid, staff_name, type, reason, issued_at, expires_at, active) "
+                    + "VALUES ('" + VICTIM + "', 'Victim', '" + STAFF + "', 'Staff', 'FUTURE_TYPE', 'x', "
+                    + System.currentTimeMillis() + ", " + (System.currentTimeMillis() - 1000) + ", 1)");
+        }
+
+        List<PunishmentRecord> due = database.getExpiredPunishments().join();
+        assertEquals(1, due.size());
+        assertEquals(expired, due.get(0).getId());
+    }
+
+    @Test
+    @DisplayName("work submitted after shutdown began fails as a future instead of throwing")
+    void rejectsWorkAfterShutdown() {
+        var closing = database.shutdown();
+        var late = database.savePunishment(punishment(PunishmentType.KICK, null));
+        assertTrue(late.isCompletedExceptionally());
+        closing.join();
+    }
+
     // ==================== Statistics ====================
+
+    @Test
+    @DisplayName("statistics show the staff member's most recent name")
+    void statisticsShowTheLatestName() {
+        PunishmentRecord older = byStaff("Zed", PunishmentType.BAN);
+        older.setIssuedAt(Instant.now().minusSeconds(3600));
+        database.savePunishment(older).join();
+        database.savePunishment(byStaff("Alex", PunishmentType.KICK)).join();
+
+        assertEquals("Alex", database.getStaffStatistics(STAFF).join().getStaffName());
+    }
 
     @Test
     @DisplayName("staff statistics group by UUID, not by name")

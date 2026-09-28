@@ -218,6 +218,12 @@ public class ModrinthUpdateChecker {
                 continue;
             }
             JsonObject candidate = element.getAsJsonObject();
+            // Only stable releases are offered; alpha and beta builds are opt-in on Modrinth.
+            JsonElement versionType = candidate.get("version_type");
+            if (versionType != null && !versionType.isJsonNull()
+                    && !"release".equalsIgnoreCase(versionType.getAsString())) {
+                continue;
+            }
             JsonElement published = candidate.get("date_published");
             String date = (published == null || published.isJsonNull()) ? "" : published.getAsString();
 

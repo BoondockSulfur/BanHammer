@@ -292,6 +292,30 @@ public class EssentialsJailIntegration {
     }
 
     /**
+     * Moves the auto-created Essentials jail along with BanHammer's jail location. Does
+     * nothing when that jail does not exist, so a jail the admin set up in Essentials is
+     * never touched.
+     */
+    public void updateBanHammerJail(Location location) {
+        if (!available) {
+            return;
+        }
+        try {
+            Object jails = getJails.invoke(essentials);
+            @SuppressWarnings("unchecked")
+            Collection<String> jailNames = (Collection<String>) jailsGetList.invoke(jails);
+            String existing = matchCell(jailNames, BANHAMMER_JAIL_NAME);
+            if (existing == null) {
+                return;
+            }
+            jailsSetJail.invoke(jails, existing, location);
+            logger.info("Moved Essentials jail '{}' to the new BanHammer jail location.", existing);
+        } catch (Exception e) {
+            logger.warn("Failed to update Essentials jail '{}'", BANHAMMER_JAIL_NAME, e);
+        }
+    }
+
+    /**
      * Releases a player from jail using Essentials.
      */
     public boolean releasePlayer(Player player) {

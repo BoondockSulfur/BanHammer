@@ -297,7 +297,8 @@ public class BanHammerPlugin extends JavaPlugin {
             }
             database = null;
             punishmentManager.updateDatabase(null);
-            punishmentManager.clearMuteCache();
+            // The mute cache is kept until the new database has been loaded; clearing it here
+            // let every muted player talk for as long as the re-initialization took.
             // Closing waits for in-flight queries, so keep it off the main thread.
             current.shutdown();
         }

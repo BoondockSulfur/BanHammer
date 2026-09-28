@@ -25,7 +25,10 @@ public final class ValidationUtil {
 
     private static Pattern wordPattern(String word) {
         return WORD_PATTERNS.computeIfAbsent(word.toLowerCase(Locale.ROOT),
-                w -> Pattern.compile("\\b" + Pattern.quote(w) + "\\b", Pattern.CASE_INSENSITIVE));
+                // Letter-based boundaries instead of \b, which only knows ASCII word characters
+                // since JDK 19: words starting or ending in ä, ö, ü or ß were never matched.
+                w -> Pattern.compile("(?<![\\p{L}\\p{N}_])" + Pattern.quote(w) + "(?![\\p{L}\\p{N}_])",
+                        Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE));
     }
 
     /**
@@ -76,7 +79,7 @@ public final class ValidationUtil {
     public static ValidationResult validateReason(String reason, int minLength, int maxLength, boolean requireReason) {
         if (reason == null || reason.trim().isEmpty()) {
             if (requireReason) {
-                return new ValidationResult(false, "A reason is required");
+                return new ValidationResult(false, "A reason is required", "validationReasonRequired", 0);
             }
             return new ValidationResult(true, null);
         }
@@ -84,11 +87,13 @@ public final class ValidationUtil {
         String trimmed = reason.trim();
 
         if (trimmed.length() < minLength) {
-            return new ValidationResult(false, String.format("Reason must be at least %d characters", minLength));
+            return new ValidationResult(false, String.format("Reason must be at least %d characters", minLength),
+                    "validationReasonTooShort", minLength);
         }
 
         if (trimmed.length() > maxLength) {
-            return new ValidationResult(false, String.format("Reason cannot exceed %d characters", maxLength));
+            return new ValidationResult(false, String.format("Reason cannot exceed %d characters", maxLength),
+                    "validationReasonTooLong", maxLength);
         }
 
         return new ValidationResult(true, null);
@@ -197,17 +202,19 @@ public final class ValidationUtil {
      */
     public static ValidationResult validateAppeal(String appealText, int minLength, int maxLength) {
         if (appealText == null || appealText.trim().isEmpty()) {
-            return new ValidationResult(false, "Appeal text cannot be empty");
+            return new ValidationResult(false, "Appeal text cannot be empty", "validationAppealEmpty", 0);
         }
 
         String trimmed = appealText.trim();
 
         if (trimmed.length() < minLength) {
-            return new ValidationResult(false, String.format("Appeal must be at least %d characters", minLength));
+            return new ValidationResult(false, String.format("Appeal must be at least %d characters", minLength),
+                    "validationAppealTooShort", minLength);
         }
 
         if (trimmed.length() > maxLength) {
-            return new ValidationResult(false, String.format("Appeal cannot exceed %d characters", maxLength));
+            return new ValidationResult(false, String.format("Appeal cannot exceed %d characters", maxLength),
+                    "validationAppealTooLong", maxLength);
         }
 
         return new ValidationResult(true, null);
@@ -219,10 +226,30 @@ public final class ValidationUtil {
     public static class ValidationResult {
         private final boolean valid;
         private final String errorMessage;
+        private final String errorKey;
+        private final int limit;
 
         public ValidationResult(boolean valid, String errorMessage) {
+            this(valid, errorMessage, null, 0);
+        }
+
+        /**
+         * @param errorKey message key of the localized text, or {@code null}
+         * @param limit    the length limit the text refers to, if any
+         */
+        public ValidationResult(boolean valid, String errorMessage, String errorKey, int limit) {
             this.valid = valid;
             this.errorMessage = errorMessage;
+            this.errorKey = errorKey;
+            this.limit = limit;
+        }
+
+        public String getErrorKey() {
+            return errorKey;
+        }
+
+        public int getLimit() {
+            return limit;
         }
 
         public boolean isValid() {

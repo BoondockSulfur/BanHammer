@@ -1,5 +1,6 @@
 package dev.banhammer.plugin.util;
 
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -8,7 +9,9 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * Scheduler abstraction for Paper/Folia dual-compatibility.
@@ -20,9 +23,6 @@ public final class FoliaScheduler {
 
     /** Written once during startup, read from async tasks - hence volatile. */
     private static volatile boolean folia;
-
-    /** Resolved lazily; {@code ScheduledTask} only exists on Folia. */
-    private static volatile java.lang.reflect.Method foliaCancelMethod;
 
     private FoliaScheduler() {}
 
@@ -64,11 +64,43 @@ public final class FoliaScheduler {
      * Use for non-entity, non-location work (events, global state).
      */
     public static void runGlobal(Plugin plugin, Runnable task) {
+        if (!plugin.isEnabled()) {
+            return;
+        }
         if (folia) {
             Bukkit.getGlobalRegionScheduler().run(plugin, scheduledTask -> task.run());
         } else {
             schedule(plugin, task);
         }
+    }
+
+    /**
+     * Runs a task on the global region thread (Folia) or the main thread (Paper) and returns
+     * its result. Runs inline when already on that thread.
+     *
+     * @return a future that completes with the result, or exceptionally if the task threw or
+     *         the plugin is being disabled
+     */
+    public static <T> CompletableFuture<T> callGlobal(Plugin plugin, Supplier<T> task) {
+        if (Bukkit.isGlobalTickThread()) {
+            try {
+                return CompletableFuture.completedFuture(task.get());
+            } catch (Throwable t) {
+                return CompletableFuture.failedFuture(t);
+            }
+        }
+        if (!plugin.isEnabled()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Plugin is disabled"));
+        }
+        CompletableFuture<T> result = new CompletableFuture<>();
+        runGlobal(plugin, () -> {
+            try {
+                result.complete(task.get());
+            } catch (Throwable t) {
+                result.completeExceptionally(t);
+            }
+        });
+        return result;
     }
 
     /**
@@ -101,6 +133,9 @@ public final class FoliaScheduler {
      *                executes (Folia only); may be {@code null}
      */
     public static void runOnEntity(Plugin plugin, Entity entity, Runnable task, Runnable retired) {
+        if (!plugin.isEnabled()) {
+            return;
+        }
         if (folia) {
             entity.getScheduler().run(plugin, scheduledTask -> task.run(), retired);
         } else {
@@ -155,9 +190,12 @@ public final class FoliaScheduler {
      * Runs a one-off task off the main thread.
      */
     public static void runAsync(Plugin plugin, Runnable task) {
+        if (!plugin.isEnabled()) {
+            return;
+        }
         if (folia) {
             Bukkit.getAsyncScheduler().runNow(plugin, scheduledTask -> task.run());
-        } else if (plugin.isEnabled()) {
+        } else {
             Bukkit.getScheduler().runTaskAsynchronously(plugin, task);
         }
     }
@@ -177,22 +215,16 @@ public final class FoliaScheduler {
             return true;
         }
 
-        // Folia ScheduledTask - resolved reflectively to avoid a compile-time dependency.
-        try {
-            java.lang.reflect.Method cancel = foliaCancelMethod;
-            if (cancel == null) {
-                cancel = taskHandle.getClass().getMethod("cancel");
-                foliaCancelMethod = cancel;
-            }
-            cancel.invoke(taskHandle);
+        // ScheduledTask is part of the Paper API, so the call goes through the public interface
+        // and works for every Folia implementation class.
+        if (taskHandle instanceof ScheduledTask scheduledTask) {
+            scheduledTask.cancel();
             return true;
-        } catch (Exception e) {
-            // A task that cannot be cancelled keeps running until the server stops, so this
-            // must not be swallowed silently.
-            Bukkit.getLogger().warning("[BanHammer] Failed to cancel scheduled task "
-                    + taskHandle.getClass().getName() + ": " + e);
-            return false;
         }
+
+        Bukkit.getLogger().warning("[BanHammer] Failed to cancel scheduled task of unknown type "
+                + taskHandle.getClass().getName());
+        return false;
     }
 
     // ========== Player Operations ==========
@@ -215,12 +247,7 @@ public final class FoliaScheduler {
      * Kicks a player with a string reason. Ensures the kick runs on the correct thread.
      */
     public static void kickPlayer(Plugin plugin, Player player, String reason) {
-        if (folia) {
-            player.getScheduler().run(plugin, scheduledTask -> player.kick(
-                    Component.text(reason != null ? reason : "")), null);
-        } else {
-            player.kick(Component.text(reason != null ? reason : ""));
-        }
+        kickPlayer(plugin, player, Component.text(reason != null ? reason : ""));
     }
 
     /**
@@ -229,8 +256,10 @@ public final class FoliaScheduler {
     public static void kickPlayer(Plugin plugin, Player player, Component reason) {
         if (folia) {
             player.getScheduler().run(plugin, scheduledTask -> player.kick(reason), null);
-        } else {
+        } else if (Bukkit.isPrimaryThread()) {
             player.kick(reason);
+        } else {
+            schedule(plugin, () -> player.kick(reason));
         }
     }
 }

@@ -47,6 +47,16 @@ class ValidationUtilTest {
     }
 
     @Test
+    void filteringHandlesUmlauts() {
+        List<String> blocked = List.of("scheiß", "ätzend", "blöd");
+        assertEquals("****** Spiel", ValidationUtil.filterReason("scheiß Spiel", blocked));
+        assertEquals("****** Typ", ValidationUtil.filterReason("ätzend Typ", blocked));
+        assertEquals("**** gelaufen", ValidationUtil.filterReason("BLÖD gelaufen", blocked));
+        // Still whole words only: a longer word containing the blocked one stays.
+        assertEquals("Blödsinn", ValidationUtil.filterReason("Blödsinn", blocked));
+    }
+
+    @Test
     void filteringToleratesEmptyInput() {
         assertEquals("hello", ValidationUtil.filterReason("hello", List.of()));
         assertEquals("hello", ValidationUtil.filterReason("hello", null));

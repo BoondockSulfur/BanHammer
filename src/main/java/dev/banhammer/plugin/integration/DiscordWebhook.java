@@ -105,8 +105,12 @@ public class DiscordWebhook {
                 .setColor(getPunishmentColor(record.getType()))
                 .addField(field(true, text("field.player", "Player"), record.getVictimName()))
                 .addField(field(false, text("field.reason", "Reason"), record.getReason()))
-                .addField(field(true, text("field.duration", "Duration"), getDurationString(record)))
                 .setTimestamp(Instant.now());
+
+        // Kicks and warnings have no duration; showing "Permanent" for them was misleading.
+        if (hasDuration(record.getType())) {
+            embed.addField(field(true, text("field.duration", "Duration"), getDurationString(record)));
+        }
 
         if (settings.showStaffName()) {
             embed.addField(field(true, text("field.staff", "Staff"), record.getStaffName()));
@@ -276,6 +280,13 @@ public class DiscordWebhook {
             case KICK -> DISCORD_COLOR_KICK;
             case MUTE, TEMP_MUTE -> DISCORD_COLOR_MUTE;
             default -> DISCORD_COLOR_BAN;
+        };
+    }
+
+    private static boolean hasDuration(PunishmentType type) {
+        return switch (type) {
+            case BAN, TEMP_BAN, IP_BAN, MUTE, TEMP_MUTE, JAIL -> true;
+            default -> false;
         };
     }
 

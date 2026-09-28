@@ -175,7 +175,18 @@ public class PunishmentManager {
             return CompletableFuture.completedFuture(PunishmentResult.notPermitted());
         }
 
-        PunishmentType requestedType = ipBan
+        // Read the address BEFORE kicking - once the connection is closed getAddress()
+        // returns null and the IP ban record would end up without an IP.
+        String rawIp = rawAddress(victim);
+        if (ipBan && rawIp == null) {
+            // Storing IP_BAN without an address would claim a ban that does not exist.
+            plugin.getSLF4JLogger().warn("Cannot IP-ban {}: their address is unknown. Banning the account only.",
+                    victim.getName());
+            ipBan = false;
+        }
+        boolean withIp = ipBan;
+
+        PunishmentType requestedType = withIp
                 ? PunishmentType.IP_BAN
                 : (duration == null ? PunishmentType.BAN : PunishmentType.TEMP_BAN);
 
@@ -191,43 +202,62 @@ public class PunishmentManager {
 
         // Re-derive the type: a listener may have turned a temp ban into a permanent one, and
         // storing TEMP_BAN with no expiry would leave a row the unban scheduler never lifts.
-        PunishmentType type = ipBan
+        PunishmentType type = withIp
                 ? PunishmentType.IP_BAN
                 : (finalDuration == null ? PunishmentType.BAN : PunishmentType.TEMP_BAN);
 
-        // Read the address BEFORE kicking - once the connection is closed getAddress()
-        // returns null and the IP ban record would end up without an IP.
-        String rawIp = rawAddress(victim);
         String storedIp = null;
         Settings.IpBan ipSettings = plugin.settings().ipBan();
-        if (ipBan && ipSettings.trackIps() && rawIp != null) {
+        if (withIp && ipSettings.trackIps()) {
             Settings.Privacy privacy = plugin.settings().privacy();
             storedIp = IPAnonymizer.anonymize(rawIp, privacy.anonymizationLevel(), privacy.hashSalt());
         }
+        String ipForRecord = storedIp;
 
+        java.util.Date expiryDate = expiresAt != null ? java.util.Date.from(expiresAt) : null;
+        String source = staffName(staff);
+
+        // The ban lists are unsynchronized maps backed by JSON files: they are written on the
+        // global thread only, never from the region thread of the staff member.
+        return FoliaScheduler.callGlobal(plugin, () -> {
+                    // Banned by account, not by name: a name ban is shed by simply renaming, and
+                    // whoever later claims that name inherits it.
+                    BanLists.ban(victim.getUniqueId(), victim.getName(), finalReason, expiryDate, source);
+                    if (withIp) {
+                        BanLists.banIp(rawIp, finalReason, expiryDate, source);
+                    }
+                    return true;
+                })
+                .handle((ok, throwable) -> {
+                    if (throwable != null) {
+                        plugin.getSLF4JLogger().error("Failed to ban player {}", victim.getName(), throwable);
+                        return false;
+                    }
+                    return true;
+                })
+                .thenCompose(applied -> {
+                    if (!applied) {
+                        return CompletableFuture.completedFuture(PunishmentResult.failed());
+                    }
+
+                    // The ban is in effect from here on; a failing kick must not hide it.
+                    kick(victim, finalReason);
+
+                    PunishmentRecord record = newRecord(staff, victim, type, finalReason, expiresAt);
+                    record.setVictimIp(ipForRecord);
+
+                    // Supersede any ban that is still marked active, so history has one active row.
+                    return supersede(victim.getUniqueId(), BAN_TYPES, staff, "Replaced by a new ban")
+                            .thenCompose(ignored -> persistAndAnnounce(staff, victim.getName(), record));
+                });
+    }
+
+    private void kick(Player victim, String reason) {
         try {
-            java.util.Date expiryDate = expiresAt != null ? java.util.Date.from(expiresAt) : null;
-
-            // Banned by account, not by name: a name ban is shed by simply renaming, and
-            // whoever later claims that name inherits it.
-            BanLists.ban(victim.getUniqueId(), victim.getName(), finalReason, expiryDate, staffName(staff));
-
-            if (ipBan && rawIp != null) {
-                BanLists.banIp(rawIp, finalReason, expiryDate, staffName(staff));
-            }
-
-            victim.kick(Component.text(finalReason != null ? finalReason : ""));
+            FoliaScheduler.kickPlayer(plugin, victim, Component.text(reason != null ? reason : ""));
         } catch (Exception e) {
-            plugin.getSLF4JLogger().error("Failed to ban player {}", victim.getName(), e);
-            return CompletableFuture.completedFuture(PunishmentResult.failed());
+            plugin.getSLF4JLogger().error("Failed to kick {}", victim.getName(), e);
         }
-
-        PunishmentRecord record = newRecord(staff, victim, type, finalReason, expiresAt);
-        record.setVictimIp(storedIp);
-
-        // Supersede any ban that is still marked active, so history has one active row.
-        return supersede(victim.getUniqueId(), BAN_TYPES, staff, "Replaced by a new ban")
-                .thenCompose(ignored -> persistAndAnnounce(staff, victim.getName(), record));
     }
 
     /**
@@ -246,12 +276,7 @@ public class PunishmentManager {
 
         String finalReason = event.getReason();
 
-        try {
-            victim.kick(Component.text(finalReason != null ? finalReason : ""));
-        } catch (Exception e) {
-            plugin.getSLF4JLogger().error("Failed to kick player {}", victim.getName(), e);
-            return CompletableFuture.completedFuture(PunishmentResult.failed());
-        }
+        kick(victim, finalReason);
 
         PunishmentRecord record = newRecord(staff, victim, PunishmentType.KICK, finalReason, null);
         record.setActive(false); // A kick is instantaneous, never "active".
@@ -291,7 +316,7 @@ public class PunishmentManager {
                 return vanillaPardon;
             }
 
-            pardonIpIfPossible(record);
+            FoliaScheduler.runGlobal(plugin, () -> pardonIpBansOf(record, false));
 
             return current.deactivatePunishment(record.getId(), staffUuid(staff), reason)
                     .thenApply(claimed -> {
@@ -304,23 +329,43 @@ public class PunishmentManager {
     }
 
     /**
-     * Lifts the IP ban belonging to a record, when that is possible at all.
+     * Lifts the IP ban entries that belong to a record. Must run on the global thread.
+     *
+     * <p>The address is usually not stored in plain text (anonymization is on by default), so
+     * the entry is identified by who issued it and when, and - where the stored value allows
+     * it - by comparing the anonymized form of each banned address with the record.
+     *
+     * @param requireExpiryMatch only lift entries whose expiry equals the record's, so a newer
+     *                           or foreign ban on the same address survives an expiry
+     * @return the number of entries removed
      */
-    private void pardonIpIfPossible(PunishmentRecord record) {
-        if (record.getType() != PunishmentType.IP_BAN || record.getVictimIp() == null) {
-            return;
+    public int pardonIpBansOf(PunishmentRecord record, boolean requireExpiryMatch) {
+        if (record.getType() != PunishmentType.IP_BAN) {
+            return 0;
         }
+        Settings.Privacy privacy = plugin.settings().privacy();
+        String storedIp = record.getVictimIp();
 
-        // The stored value is only the real address when anonymization is off; otherwise it
-        // is masked or hashed and there is nothing to hand to pardon().
-        if (plugin.settings().privacy().anonymizationLevel() == IPAnonymizer.AnonymizationLevel.NONE
-                && IPAnonymizer.isLiteralIp(record.getVictimIp())) {
-            FoliaScheduler.runGlobal(plugin, () -> BanLists.pardonIp(record.getVictimIp()));
-        } else {
-            plugin.getSLF4JLogger().warn("The IP ban for {} cannot be lifted automatically because the stored "
-                    + "address is anonymized ({}). Use /pardon-ip manually.",
-                    record.getVictimName(), plugin.settings().privacy().anonymizationLevel());
+        int removed = BanLists.pardonIps(entry -> {
+            if (!java.util.Objects.equals(entry.getSource(), record.getStaffName())) {
+                return false;
+            }
+            if (!BanLists.sameInstant(entry.getCreated(), record.getIssuedAt())) {
+                return false;
+            }
+            if (requireExpiryMatch && !BanLists.sameInstant(entry.getExpiration(), record.getExpiresAt())) {
+                return false;
+            }
+            return storedIp == null || storedIp.equals(
+                    IPAnonymizer.anonymize(entry.getBanTarget().getHostAddress(),
+                    privacy.anonymizationLevel(), privacy.hashSalt()));
+        });
+
+        if (removed == 0 && !requireExpiryMatch) {
+            plugin.getSLF4JLogger().warn("No IP ban entry matching record #{} ({}) was found; it may already be "
+                    + "gone. Otherwise lift it with /pardon-ip.", record.getId(), record.getVictimName());
         }
+        return removed;
     }
 
     // ==================== Mutes ====================
@@ -422,14 +467,18 @@ public class PunishmentManager {
         current.getActivePunishmentsByTypesGlobal(MUTE_TYPES)
                 .thenAccept(mutes -> {
                     Instant now = Instant.now();
-                    int loaded = 0;
+                    Map<UUID, PunishmentRecord> fresh = new java.util.HashMap<>();
                     for (PunishmentRecord mute : mutes) {
                         if (mute.getExpiresAt() == null || mute.getExpiresAt().isAfter(now)) {
-                            activeMutes.put(mute.getVictimUuid(), mute);
-                            loaded++;
+                            fresh.put(mute.getVictimUuid(), mute);
                         }
                     }
-                    plugin.getSLF4JLogger().info("Loaded {} active mute(s)", loaded);
+                    // Replace instead of clear-and-fill, so there is no moment without mutes.
+                    // Mutes that were never saved (issued while no database was connected)
+                    // stay, since the database cannot know about them.
+                    activeMutes.entrySet().removeIf(e -> e.getValue().getId() > 0 && !fresh.containsKey(e.getKey()));
+                    activeMutes.putAll(fresh);
+                    plugin.getSLF4JLogger().info("Loaded {} active mute(s)", fresh.size());
                 })
                 .exceptionally(throwable -> {
                     plugin.getSLF4JLogger().error("Failed to load active mutes", throwable);
@@ -438,17 +487,11 @@ public class PunishmentManager {
     }
 
     /**
-     * Removes a mute from the cache (called by the unban scheduler on expiry).
+     * Removes a mute from the cache, but only if the cached mute is the given record. A newer
+     * mute issued while the old one was expiring stays in place.
      */
-    public void removeMuteFromCache(UUID playerUuid) {
-        activeMutes.remove(playerUuid);
-    }
-
-    /**
-     * Drops every cached mute (called when the database is swapped out on reload).
-     */
-    public void clearMuteCache() {
-        activeMutes.clear();
+    public void removeMuteFromCache(UUID playerUuid, int recordId) {
+        activeMutes.computeIfPresent(playerUuid, (uuid, cached) -> cached.getId() == recordId ? null : cached);
     }
 
     // ==================== Jail ====================
@@ -533,6 +576,59 @@ public class PunishmentManager {
                                 return count > 0;
                             });
                 });
+    }
+
+    // ==================== Lifting by record ====================
+
+    /**
+     * Lifts exactly one punishment, identified by its record ID, and undoes its in-game effect
+     * according to its type. Used for approved appeals, which refer to a specific punishment
+     * rather than to "the" ban of a player name.
+     *
+     * @return true if the record was active and this call lifted it
+     */
+    public CompletableFuture<Boolean> liftPunishment(CommandSender staff, int punishmentId, String reason) {
+        Database current = database;
+        if (current == null) {
+            return CompletableFuture.completedFuture(false);
+        }
+
+        return current.getPunishment(punishmentId).thenCompose(record -> {
+            if (record == null || !record.isActive()) {
+                return CompletableFuture.completedFuture(false);
+            }
+            return current.deactivatePunishment(punishmentId, staffUuid(staff), reason).thenApply(claimed -> {
+                if (claimed) {
+                    undoInGame(record);
+                    announceRemoval(staff, record, reason);
+                }
+                return claimed;
+            });
+        });
+    }
+
+    private void undoInGame(PunishmentRecord record) {
+        UUID uuid = record.getVictimUuid();
+        switch (record.getType()) {
+            case BAN, TEMP_BAN, IP_BAN -> FoliaScheduler.runGlobal(plugin, () -> {
+                BanLists.pardon(uuid, record.getVictimName());
+                pardonIpBansOf(record, false);
+            });
+            case MUTE, TEMP_MUTE -> removeMuteFromCache(uuid, record.getId());
+            case JAIL -> {
+                Player jailed = Bukkit.getPlayer(uuid);
+                if (jailed != null && jailed.isOnline()) {
+                    FoliaScheduler.runOnEntity(plugin, jailed,
+                            () -> plugin.getJailManager().releasePlayer(jailed),
+                            () -> plugin.getJailManager().releasePlayerByUUID(uuid));
+                } else {
+                    plugin.getJailManager().releasePlayerByUUID(uuid);
+                }
+            }
+            default -> {
+                // Warnings only need the deactivated row; kicks are never active.
+            }
+        }
     }
 
     // ==================== Warnings ====================
@@ -685,24 +781,35 @@ public class PunishmentManager {
                                                                    PunishmentRecord record) {
         Database current = database;
         if (current == null) {
-            announce(staff, victimName, record);
+            announceSafely(staff, victimName, record);
             return CompletableFuture.completedFuture(PunishmentResult.success(0));
         }
 
         return current.savePunishment(record)
-                .thenApply(id -> {
+                .handle((id, throwable) -> {
+                    if (throwable != null) {
+                        // The punishment is already in effect in-game; make very sure this is not
+                        // swallowed, because the record is now missing from the history.
+                        plugin.getSLF4JLogger().error("Punishment for {} was applied but could NOT be saved to the "
+                                + "database. It will not appear in the history.", victimName, throwable);
+                        announceSafely(staff, victimName, record);
+                        return PunishmentResult.failed();
+                    }
                     record.setId(id);
-                    announce(staff, victimName, record);
+                    announceSafely(staff, victimName, record);
                     return PunishmentResult.success(id);
-                })
-                .exceptionally(throwable -> {
-                    // The punishment is already in effect in-game; make very sure this is not
-                    // swallowed, because the record is now missing from the history.
-                    plugin.getSLF4JLogger().error("Punishment for {} was applied but could NOT be saved to the "
-                            + "database. It will not appear in the history.", victimName, throwable);
-                    announce(staff, victimName, record);
-                    return PunishmentResult.failed();
                 });
+    }
+
+    /**
+     * Announces without letting a failure there be mistaken for a failed save.
+     */
+    private void announceSafely(CommandSender staff, String victimName, PunishmentRecord record) {
+        try {
+            announce(staff, victimName, record);
+        } catch (Exception e) {
+            plugin.getSLF4JLogger().error("Failed to announce punishment #{} for {}", record.getId(), victimName, e);
+        }
     }
 
     private void announce(CommandSender staff, String victimName, PunishmentRecord record) {

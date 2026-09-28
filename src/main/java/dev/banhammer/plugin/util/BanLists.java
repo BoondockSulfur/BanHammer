@@ -2,11 +2,18 @@ package dev.banhammer.plugin.util;
 
 import com.destroystokyo.paper.profile.PlayerProfile;
 import io.papermc.paper.ban.BanListType;
+import org.bukkit.BanEntry;
 import org.bukkit.BanList;
 import org.bukkit.Bukkit;
 
+import java.net.InetAddress;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Date;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 /**
  * Thin wrapper around Bukkit's ban lists that bans by <em>profile</em> (UUID + name) rather
@@ -96,6 +103,50 @@ public final class BanLists {
     }
 
     /**
+     * Lifts an account ban only if it is still the entry with the given expiry.
+     *
+     * <p>Used when a temporary ban expires. Any other entry for the same account - a
+     * permanent ban added by {@code /minecraft:ban}, RCON or another plugin, or a newer
+     * BanHammer ban - has a different expiry and is left alone.
+     *
+     * @return true if an entry was removed
+     */
+    @SuppressWarnings("deprecation")
+    public static boolean pardonIfExpiring(UUID uuid, String name, Instant expiresAt) {
+        boolean removed = false;
+        if (uuid != null) {
+            PlayerProfile profile = profile(uuid, name);
+            BanEntry<?> entry = profiles().getBanEntry(profile);
+            if (entry != null && sameInstant(entry.getExpiration(), expiresAt)) {
+                profiles().pardon(profile);
+                removed = true;
+            }
+        }
+        if (name != null) {
+            BanEntry<?> entry = names().getBanEntry(name);
+            if (entry != null && sameInstant(entry.getExpiration(), expiresAt)) {
+                names().pardon(name);
+                removed = true;
+            }
+        }
+        return removed;
+    }
+
+    /**
+     * Compares a ban list date with an instant. The vanilla files store whole seconds, and the
+     * list entry is written a moment before the database record, hence the tolerance.
+     */
+    public static boolean sameInstant(Date date, Instant instant) {
+        if (date == null || instant == null) {
+            return date == null && instant == null;
+        }
+        return Math.abs(date.toInstant().toEpochMilli() - instant.toEpochMilli()) <= MATCH_TOLERANCE.toMillis();
+    }
+
+    /** How far apart a ban list timestamp and the matching database timestamp may be. */
+    public static final Duration MATCH_TOLERANCE = Duration.ofSeconds(30);
+
+    /**
      * @param uuid the player's UUID, or {@code null} if unknown
      * @param name the player's name, or {@code null} if unknown
      * @return true if either the profile or the legacy name entry is banned
@@ -121,6 +172,20 @@ public final class BanLists {
     @SuppressWarnings("deprecation")
     public static void banIp(String ip, String reason, Date expires, String source) {
         ips().addBan(ip, reason, expires, source);
+    }
+
+    /**
+     * Lifts every IP ban whose entry matches.
+     *
+     * @return the number of entries removed
+     */
+    @SuppressWarnings("deprecation")
+    public static int pardonIps(Predicate<BanEntry<InetAddress>> matcher) {
+        BanList<InetAddress> list = Bukkit.getBanList(BanListType.IP);
+        Set<BanEntry<InetAddress>> entries = list.getEntries();
+        List<String> targets = entries.stream().filter(matcher).map(BanEntry::getTarget).toList();
+        targets.forEach(BanLists::pardonIp);
+        return targets.size();
     }
 
     /**
