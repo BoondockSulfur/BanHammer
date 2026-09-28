@@ -1,4 +1,4 @@
-# BanHammer 4.1.0 - Enhanced Edition
+# BanHammer 4.2.0 - Enhanced Edition
 
 <div align="center">
 
@@ -455,7 +455,7 @@ pm.getHistory(playerUuid, 50)
 
 2. **Install Plugin:**
    ```bash
-   cp banhammer-4.1.0.jar server/plugins/
+   cp banhammer-4.2.0.jar server/plugins/
    ```
 
    > The plugin jar is ~266 KB. Its database and Discord libraries are downloaded from Maven
