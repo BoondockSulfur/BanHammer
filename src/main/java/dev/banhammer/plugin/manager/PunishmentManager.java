@@ -140,13 +140,42 @@ public class PunishmentManager {
      * @return true if the punishment may proceed
      */
     public boolean canPunish(CommandSender staff, Player victim) {
+        return canPunish(staff, PunishmentTarget.of(victim));
+    }
+
+    /**
+     * Offline targets can only be checked for operator status: permissions are not available
+     * for players who are not connected.
+     */
+    public boolean canPunish(CommandSender staff, PunishmentTarget victim) {
         if (!(staff instanceof Player staffPlayer)) {
             return true; // Console is unrestricted.
         }
-        if (staffPlayer.getUniqueId().equals(victim.getUniqueId())) {
+        if (staffPlayer.getUniqueId().equals(victim.uuid())) {
             return false; // No self-punishment.
         }
-        return !victim.hasPermission("banhammer.bypass") && !victim.isOp();
+        if (victim.isOnline()) {
+            return !victim.player().hasPermission("banhammer.bypass") && !victim.player().isOp();
+        }
+        return !Bukkit.getOfflinePlayer(victim.uuid()).isOp();
+    }
+
+    /**
+     * Resolves a name to a punishment target: the online player, or a player who has been on
+     * this server before. Never asks Mojang, so a name that was never seen here resolves to
+     * {@code null} instead of a guessed account.
+     */
+    public PunishmentTarget resolveTarget(String playerName) {
+        Player online = Bukkit.getPlayerExact(playerName);
+        if (online != null) {
+            return PunishmentTarget.of(online);
+        }
+        OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(playerName);
+        if (cached == null || !cached.hasPlayedBefore()) {
+            return null;
+        }
+        String name = cached.getName() != null ? cached.getName() : playerName;
+        return new PunishmentTarget(cached.getUniqueId(), name, null);
     }
 
     private static UUID staffUuid(CommandSender staff) {
@@ -171,17 +200,25 @@ public class PunishmentManager {
      */
     public CompletableFuture<PunishmentResult> banPlayer(CommandSender staff, Player victim, String reason,
                                                          Duration duration, boolean ipBan) {
+        return banPlayer(staff, PunishmentTarget.of(victim), reason, duration, ipBan);
+    }
+
+    /**
+     * Bans a player who may be offline. IP bans need a connected player.
+     */
+    public CompletableFuture<PunishmentResult> banPlayer(CommandSender staff, PunishmentTarget victim, String reason,
+                                                         Duration duration, boolean ipBan) {
         if (!canPunish(staff, victim)) {
             return CompletableFuture.completedFuture(PunishmentResult.notPermitted());
         }
 
         // Read the address BEFORE kicking - once the connection is closed getAddress()
         // returns null and the IP ban record would end up without an IP.
-        String rawIp = rawAddress(victim);
+        String rawIp = victim.isOnline() ? rawAddress(victim.player()) : null;
         if (ipBan && rawIp == null) {
             // Storing IP_BAN without an address would claim a ban that does not exist.
             plugin.getSLF4JLogger().warn("Cannot IP-ban {}: their address is unknown. Banning the account only.",
-                    victim.getName());
+                    victim.name());
             ipBan = false;
         }
         boolean withIp = ipBan;
@@ -190,7 +227,8 @@ public class PunishmentManager {
                 ? PunishmentType.IP_BAN
                 : (duration == null ? PunishmentType.BAN : PunishmentType.TEMP_BAN);
 
-        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, requestedType, reason, duration);
+        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim.uuid(), victim.name(), victim.player(),
+                requestedType, reason, duration);
         Bukkit.getPluginManager().callEvent(event);
         if (event.isCancelled()) {
             return CompletableFuture.completedFuture(PunishmentResult.cancelled());
@@ -222,7 +260,7 @@ public class PunishmentManager {
         return FoliaScheduler.callGlobal(plugin, () -> {
                     // Banned by account, not by name: a name ban is shed by simply renaming, and
                     // whoever later claims that name inherits it.
-                    BanLists.ban(victim.getUniqueId(), victim.getName(), finalReason, expiryDate, source);
+                    BanLists.ban(victim.uuid(), victim.name(), finalReason, expiryDate, source);
                     if (withIp) {
                         BanLists.banIp(rawIp, finalReason, expiryDate, source);
                     }
@@ -230,7 +268,7 @@ public class PunishmentManager {
                 })
                 .handle((ok, throwable) -> {
                     if (throwable != null) {
-                        plugin.getSLF4JLogger().error("Failed to ban player {}", victim.getName(), throwable);
+                        plugin.getSLF4JLogger().error("Failed to ban player {}", victim.name(), throwable);
                         return false;
                     }
                     return true;
@@ -241,14 +279,16 @@ public class PunishmentManager {
                     }
 
                     // The ban is in effect from here on; a failing kick must not hide it.
-                    kick(victim, finalReason);
+                    if (victim.isOnline()) {
+                        kick(victim.player(), finalReason);
+                    }
 
-                    PunishmentRecord record = newRecord(staff, victim, type, finalReason, expiresAt);
+                    PunishmentRecord record = newRecord(staff, victim.uuid(), victim.name(), type, finalReason, expiresAt);
                     record.setVictimIp(ipForRecord);
 
                     // Supersede any ban that is still marked active, so history has one active row.
-                    return supersede(victim.getUniqueId(), BAN_TYPES, staff, "Replaced by a new ban")
-                            .thenCompose(ignored -> persistAndAnnounce(staff, victim.getName(), record));
+                    return supersede(victim.uuid(), BAN_TYPES, staff, "Replaced by a new ban")
+                            .thenCompose(ignored -> persistAndAnnounce(staff, victim.name(), record));
                 });
     }
 
@@ -278,7 +318,8 @@ public class PunishmentManager {
 
         kick(victim, finalReason);
 
-        PunishmentRecord record = newRecord(staff, victim, PunishmentType.KICK, finalReason, null);
+        PunishmentRecord record = newRecord(staff, victim.getUniqueId(), victim.getName(), PunishmentType.KICK,
+                finalReason, null);
         record.setActive(false); // A kick is instantaneous, never "active".
 
         return persistAndAnnounce(staff, victim.getName(), record);
@@ -375,12 +416,21 @@ public class PunishmentManager {
      */
     public CompletableFuture<PunishmentResult> mutePlayer(CommandSender staff, Player victim, String reason,
                                                           Duration duration) {
+        return mutePlayer(staff, PunishmentTarget.of(victim), reason, duration);
+    }
+
+    /**
+     * Mutes a player who may be offline; the mute takes effect with their next message.
+     */
+    public CompletableFuture<PunishmentResult> mutePlayer(CommandSender staff, PunishmentTarget victim, String reason,
+                                                          Duration duration) {
         if (!canPunish(staff, victim)) {
             return CompletableFuture.completedFuture(PunishmentResult.notPermitted());
         }
 
         PunishmentType requestedType = duration == null ? PunishmentType.MUTE : PunishmentType.TEMP_MUTE;
-        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, requestedType, reason, duration);
+        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim.uuid(), victim.name(), victim.player(),
+                requestedType, reason, duration);
         Bukkit.getPluginManager().callEvent(event);
         if (event.isCancelled()) {
             return CompletableFuture.completedFuture(PunishmentResult.cancelled());
@@ -391,14 +441,14 @@ public class PunishmentManager {
         Instant expiresAt = finalDuration != null ? Instant.now().plus(finalDuration) : null;
         PunishmentType type = finalDuration == null ? PunishmentType.MUTE : PunishmentType.TEMP_MUTE;
 
-        PunishmentRecord record = newRecord(staff, victim, type, finalReason, expiresAt);
+        PunishmentRecord record = newRecord(staff, victim.uuid(), victim.name(), type, finalReason, expiresAt);
 
         // Cache immediately: waiting for the database round-trip leaves a window in which the
         // player is officially muted but can still talk.
-        activeMutes.put(victim.getUniqueId(), record);
+        activeMutes.put(victim.uuid(), record);
 
-        return supersede(victim.getUniqueId(), MUTE_TYPES, staff, "Replaced by a new mute")
-                .thenCompose(ignored -> persistAndAnnounce(staff, victim.getName(), record));
+        return supersede(victim.uuid(), MUTE_TYPES, staff, "Replaced by a new mute")
+                .thenCompose(ignored -> persistAndAnnounce(staff, victim.name(), record));
     }
 
     /**
@@ -511,17 +561,30 @@ public class PunishmentManager {
      */
     public CompletableFuture<PunishmentResult> jailPlayer(CommandSender staff, Player victim, String reason,
                                                           Duration duration, String cellName) {
+        return jailPlayer(staff, PunishmentTarget.of(victim), reason, duration, cellName);
+    }
+
+    /**
+     * Jails a player who may be offline. An offline player is jailed on their next join, and
+     * a temporary jail only counts down while the player is online.
+     *
+     * @param cellName the Essentials cell to use for an online player, or {@code null} for
+     *                 the configured default
+     */
+    public CompletableFuture<PunishmentResult> jailPlayer(CommandSender staff, PunishmentTarget victim, String reason,
+                                                          Duration duration, String cellName) {
         if (!canPunish(staff, victim)) {
             return CompletableFuture.completedFuture(PunishmentResult.notPermitted());
         }
 
         if (!plugin.settings().jail().enabled()) {
             plugin.getSLF4JLogger().warn("Refusing to jail {}: the jail system is disabled in config",
-                    victim.getName());
+                    victim.name());
             return CompletableFuture.completedFuture(PunishmentResult.failed());
         }
 
-        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, PunishmentType.JAIL, reason, duration);
+        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim.uuid(), victim.name(), victim.player(),
+                PunishmentType.JAIL, reason, duration);
         Bukkit.getPluginManager().callEvent(event);
         if (event.isCancelled()) {
             return CompletableFuture.completedFuture(PunishmentResult.cancelled());
@@ -534,16 +597,18 @@ public class PunishmentManager {
         // Apply the jail first and abort if it fails. Storing an active JAIL record for a
         // player who is still walking around free would leave the database lying, and the
         // staff member would have been told the jail succeeded.
-        if (!plugin.getJailManager().jailPlayer(victim, finalDuration, cellName)) {
+        if (!victim.isOnline()) {
+            plugin.getJailManager().jailOffline(victim.uuid(), finalDuration);
+        } else if (!plugin.getJailManager().jailPlayer(victim.player(), finalDuration, cellName)) {
             plugin.getSLF4JLogger().warn("Failed to jail {} - no jail location configured, or the "
-                    + "Essentials integration rejected the request", victim.getName());
+                    + "Essentials integration rejected the request", victim.name());
             return CompletableFuture.completedFuture(PunishmentResult.failed());
         }
 
-        PunishmentRecord record = newRecord(staff, victim, PunishmentType.JAIL, finalReason, expiresAt);
+        PunishmentRecord record = newRecord(staff, victim.uuid(), victim.name(), PunishmentType.JAIL, finalReason, expiresAt);
 
-        return supersede(victim.getUniqueId(), List.of(PunishmentType.JAIL), staff, "Replaced by a new jail")
-                .thenCompose(ignored -> persistAndAnnounce(staff, victim.getName(), record));
+        return supersede(victim.uuid(), List.of(PunishmentType.JAIL), staff, "Replaced by a new jail")
+                .thenCompose(ignored -> persistAndAnnounce(staff, victim.name(), record));
     }
 
     /**
@@ -637,19 +702,27 @@ public class PunishmentManager {
      * Warns a player and auto-bans once the threshold is reached.
      */
     public CompletableFuture<PunishmentResult> warnPlayer(CommandSender staff, Player victim, String reason) {
+        return warnPlayer(staff, PunishmentTarget.of(victim), reason);
+    }
+
+    /**
+     * Warns a player who may be offline.
+     */
+    public CompletableFuture<PunishmentResult> warnPlayer(CommandSender staff, PunishmentTarget victim, String reason) {
         if (!canPunish(staff, victim)) {
             return CompletableFuture.completedFuture(PunishmentResult.notPermitted());
         }
 
-        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim, PunishmentType.WARNING, reason, null);
+        PlayerPunishEvent event = new PlayerPunishEvent(staff, victim.uuid(), victim.name(), victim.player(),
+                PunishmentType.WARNING, reason, null);
         Bukkit.getPluginManager().callEvent(event);
         if (event.isCancelled()) {
             return CompletableFuture.completedFuture(PunishmentResult.cancelled());
         }
 
-        PunishmentRecord record = newRecord(staff, victim, PunishmentType.WARNING, event.getReason(), null);
+        PunishmentRecord record = newRecord(staff, victim.uuid(), victim.name(), PunishmentType.WARNING, event.getReason(), null);
 
-        return persistAndAnnounce(staff, victim.getName(), record)
+        return persistAndAnnounce(staff, victim.name(), record)
                 .thenCompose(result -> {
                     if (!result.isSuccess() || database == null) {
                         return CompletableFuture.completedFuture(result);
@@ -676,7 +749,7 @@ public class PunishmentManager {
      * <p>The counted warnings are deactivated afterwards. Without that reset the count only
      * ever grows, so every single warning past the threshold triggered another ban.
      */
-    private CompletableFuture<Void> checkWarningThreshold(CommandSender staff, Player victim) {
+    private CompletableFuture<Void> checkWarningThreshold(CommandSender staff, PunishmentTarget victim) {
         Settings.Warnings warnings = plugin.settings().warnings();
         if (!warnings.enabled()) {
             return CompletableFuture.completedFuture(null);
@@ -687,7 +760,7 @@ public class PunishmentManager {
             return CompletableFuture.completedFuture(null);
         }
 
-        return getWarningCount(victim.getUniqueId()).thenCompose(count -> {
+        return getWarningCount(victim.uuid()).thenCompose(count -> {
             if (count < warnings.autoBanThreshold()) {
                 return CompletableFuture.completedFuture(null);
             }
@@ -697,17 +770,16 @@ public class PunishmentManager {
 
             // Consume the warnings first, so a failure to ban does not leave the player
             // primed to be banned again by their next warning.
-            return current.deactivateActivePunishments(victim.getUniqueId(), List.of(PunishmentType.WARNING),
+            return current.deactivateActivePunishments(victim.uuid(), List.of(PunishmentType.WARNING),
                             staffUuid(staff), "Consumed by automatic ban")
                     .thenAccept(ignored -> FoliaScheduler.runGlobal(plugin, () -> {
-                        if (!victim.isOnline()) {
-                            plugin.getSLF4JLogger().info("Skipping auto-ban of {}: player went offline",
-                                    victim.getName());
-                            return;
-                        }
-                        banPlayer(staff, victim, reason, duration, false).thenAccept(result ->
+                        // Bans work offline as well, so a player who logged out right after
+                        // the warning is banned all the same.
+                        PunishmentTarget target = victim.isOnline() ? victim
+                                : new PunishmentTarget(victim.uuid(), victim.name(), null);
+                        banPlayer(staff, target, reason, duration, false).thenAccept(result ->
                                 plugin.getSLF4JLogger().info("Player {} auto-banned after {} warnings ({})",
-                                        victim.getName(), count, result.status()));
+                                        victim.name(), count, result.status()));
                     }));
         });
     }
@@ -736,11 +808,11 @@ public class PunishmentManager {
 
     // ==================== Internals ====================
 
-    private PunishmentRecord newRecord(CommandSender staff, Player victim, PunishmentType type,
-                                       String reason, Instant expiresAt) {
+    private PunishmentRecord newRecord(CommandSender staff, UUID victimUuid, String victimName,
+                                       PunishmentType type, String reason, Instant expiresAt) {
         PunishmentRecord record = new PunishmentRecord(
-                victim.getUniqueId(),
-                victim.getName(),
+                victimUuid,
+                victimName,
                 null,
                 staffUuid(staff),
                 staffName(staff),

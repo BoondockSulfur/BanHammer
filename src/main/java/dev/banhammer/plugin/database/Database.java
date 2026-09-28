@@ -156,6 +156,14 @@ public interface Database {
     CompletableFuture<Boolean> deactivatePunishment(int punishmentId, UUID staffUuid, String reason);
 
     /**
+     * Moves the expiry of a punishment that is still active. Does nothing once the record has
+     * been deactivated, so it cannot revive a punishment lifted in the meantime.
+     *
+     * @return CompletableFuture with true if the record was updated
+     */
+    CompletableFuture<Boolean> updateExpiry(int punishmentId, Instant expiresAt);
+
+    /**
      * Deactivates every active punishment of the given types for a player.
      * Used to keep at most one active mute/jail per player.
      *

@@ -2,6 +2,7 @@ package dev.banhammer.plugin.command;
 
 import dev.banhammer.plugin.BanHammerPlugin;
 import dev.banhammer.plugin.manager.PunishmentManager.PunishmentResult;
+import dev.banhammer.plugin.manager.PunishmentTarget;
 import dev.banhammer.plugin.util.DurationParser;
 import dev.banhammer.plugin.util.FoliaScheduler;
 import dev.banhammer.plugin.util.ValidationUtil;
@@ -74,7 +75,8 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
             return;
         }
 
-        Player victim = Bukkit.getPlayerExact(args[0]);
+        // Online players and players who have been on this server before.
+        PunishmentTarget victim = plugin.getPunishmentManager().resolveTarget(args[0]);
         if (victim == null) {
             reply(sender, prefixed(plugin.messages().playerNotFound()));
             return;
@@ -99,14 +101,14 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
 
         plugin.getPunishmentManager().mutePlayer(sender, victim, finalReason, duration)
                 .thenAccept(result -> {
-                    if (report(sender, result, victim.getName(), plugin.messages().errorOccurred())) {
-                        reply(sender, prefixed(plugin.messages().mutedSuccess(victim.getName(), durationText)));
+                    if (report(sender, result, victim.name(), plugin.messages().errorOccurred())) {
+                        reply(sender, prefixed(plugin.messages().mutedSuccess(victim.name(), durationText)));
                         if (victim.isOnline()) {
-                            victim.sendMessage(plugin.messages().mutedMessage(durationText, finalReason));
+                            victim.player().sendMessage(plugin.messages().mutedMessage(durationText, finalReason));
                         }
                     }
                 })
-                .exceptionally(throwable -> fail(sender, "mute " + victim.getName(), throwable));
+                .exceptionally(throwable -> fail(sender, "mute " + victim.name(), throwable));
     }
 
     private void handleUnmute(CommandSender sender, String[] args) {
@@ -157,7 +159,8 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
             return;
         }
 
-        Player victim = Bukkit.getPlayerExact(args[0]);
+        // Online players and players who have been on this server before.
+        PunishmentTarget victim = plugin.getPunishmentManager().resolveTarget(args[0]);
         if (victim == null) {
             reply(sender, prefixed(plugin.messages().playerNotFound()));
             return;
@@ -195,11 +198,11 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
 
         plugin.getPunishmentManager().jailPlayer(sender, victim, checked, duration, cellName)
                 .thenAccept(result -> {
-                    if (report(sender, result, victim.getName(), plugin.messages().jailFailed())) {
-                        reply(sender, prefixed(plugin.messages().jailedSuccess(victim.getName(), durationText)));
+                    if (report(sender, result, victim.name(), plugin.messages().jailFailed())) {
+                        reply(sender, prefixed(plugin.messages().jailedSuccess(victim.name(), durationText)));
                     }
                 })
-                .exceptionally(throwable -> fail(sender, "jail " + victim.getName(), throwable));
+                .exceptionally(throwable -> fail(sender, "jail " + victim.name(), throwable));
     }
 
     private void handleUnjail(CommandSender sender, String[] args) {
@@ -261,7 +264,8 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
             return;
         }
 
-        Player victim = Bukkit.getPlayerExact(args[0]);
+        // Online players and players who have been on this server before.
+        PunishmentTarget victim = plugin.getPunishmentManager().resolveTarget(args[0]);
         if (victim == null) {
             reply(sender, prefixed(plugin.messages().playerNotFound()));
             return;
@@ -280,22 +284,22 @@ public class PunishmentCommands implements CommandExecutor, TabCompleter {
                 .thenAccept(result -> {
                     if (!result.isSuccess()) {
                         FoliaScheduler.runGlobal(plugin, () ->
-                                report(sender, result, victim.getName(), plugin.messages().errorOccurred()));
+                                report(sender, result, victim.name(), plugin.messages().errorOccurred()));
                         return;
                     }
 
                     // A dedicated COUNT query rather than pulling the whole history and
                     // filtering it in memory, which also disagreed with the auto-ban counter.
-                    plugin.getPunishmentManager().getWarningCount(victim.getUniqueId())
+                    plugin.getPunishmentManager().getWarningCount(victim.uuid())
                             .thenAccept(count -> {
-                                reply(sender, prefixed(plugin.messages().warnedSuccess(victim.getName())));
+                                reply(sender, prefixed(plugin.messages().warnedSuccess(victim.name())));
                                 if (victim.isOnline()) {
-                                    victim.sendMessage(plugin.messages().warnedMessage(finalReason));
-                                    victim.sendMessage(plugin.messages().warnCount(count, threshold));
+                                    victim.player().sendMessage(plugin.messages().warnedMessage(finalReason));
+                                    victim.player().sendMessage(plugin.messages().warnCount(count, threshold));
                                 }
                             });
                 })
-                .exceptionally(throwable -> fail(sender, "warn " + victim.getName(), throwable));
+                .exceptionally(throwable -> fail(sender, "warn " + victim.name(), throwable));
     }
 
     // ==================== Setjail ====================

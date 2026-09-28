@@ -478,6 +478,18 @@ public abstract class AbstractSqlDatabase implements Database {
     }
 
     @Override
+    public CompletableFuture<Boolean> updateExpiry(int punishmentId, Instant expiresAt) {
+        return run("updateExpiry", conn -> {
+            try (PreparedStatement stmt = conn.prepareStatement(
+                    "UPDATE punishments SET expires_at = ? WHERE id = ? AND active = 1")) {
+                setNullableLong(stmt, 1, expiresAt);
+                stmt.setInt(2, punishmentId);
+                return stmt.executeUpdate() > 0;
+            }
+        });
+    }
+
+    @Override
     public CompletableFuture<Void> updatePunishment(PunishmentRecord record) {
         return run("updatePunishment", conn -> {
             String sql = """

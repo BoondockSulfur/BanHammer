@@ -209,6 +209,20 @@ class SQLiteDatabaseTest {
     }
 
     @Test
+    @DisplayName("moving an expiry only affects records that are still active")
+    void updateExpiryLeavesLiftedRecordsAlone() {
+        Instant later = Instant.now().plusSeconds(3600);
+        int active = database.savePunishment(punishment(PunishmentType.JAIL, Instant.now().plusSeconds(60))).join();
+        int lifted = database.savePunishment(punishment(PunishmentType.JAIL, Instant.now().plusSeconds(60))).join();
+        database.deactivatePunishment(lifted, null, "released").join();
+
+        assertTrue(database.updateExpiry(active, later).join());
+        assertFalse(database.updateExpiry(lifted, later).join());
+        assertEquals(later.toEpochMilli(), database.getPunishment(active).join().getExpiresAt().toEpochMilli());
+        assertFalse(database.getPunishment(lifted).join().isActive(), "a lifted jail must not come back");
+    }
+
+    @Test
     @DisplayName("work submitted after shutdown began fails as a future instead of throwing")
     void rejectsWorkAfterShutdown() {
         var closing = database.shutdown();

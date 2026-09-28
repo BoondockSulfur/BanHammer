@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### ✨ Added
+
+- `/bh ban <player> [duration] [reason]` (permission `banhammer.ban`).
+- Punishing offline players who have been on the server before (`/bh ban`, `/mute`, `/jail`,
+  `/warn`). Offline jails are applied on the next join.
+- Jail time only counts down while the player is online.
+
 ### 🐛 Bug fixes
 
 - Expiring temporary bans no longer remove other bans on the same player.

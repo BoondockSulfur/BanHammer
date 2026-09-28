@@ -482,6 +482,7 @@ pm.getHistory(playerUuid, 50)
 | `/bh give <player>` | Give BanHammer to player | `banhammer.give` |
 | `/bh reload` | Reload config (reinitializes Discord & DB) | `banhammer.reload` |
 | `/bh history <player> [page]` | Show punishment history | `banhammer.history` |
+| `/bh ban <player> [duration] [reason]` | Ban a player (permanent without duration) | `banhammer.ban` |
 | `/bh unban <player> [reason]` | Unban a player | `banhammer.unban` |
 | `/bh stats [player]` | Show statistics | `banhammer.stats` |
 | `/bh gui` | Open statistics GUI | `banhammer.stats` |
@@ -498,6 +499,10 @@ pm.getHistory(playerUuid, 50)
 
 **Alias:** `/bh` is shorthand for `/banhammer`
 
+**Offline players:** `/bh ban`, `/mute`, `/jail` and `/warn` also work for offline players who
+have been on the server before. An offline jail is applied on the next join. Jail time only
+counts down while the player is online; bans and mutes expire by the clock.
+
 ---
 
 ## 🔑 Permissions
@@ -511,6 +516,7 @@ pm.getHistory(playerUuid, 50)
 | `banhammer.bypass` | Immune to BanHammer | op |
 | `banhammer.history` | Can view history | op |
 | `banhammer.history.others` | Can view others' history | op |
+| `banhammer.ban` | Can ban with `/bh ban` | op |
 | `banhammer.unban` | Can unban players | op |
 | `banhammer.stats` | Can view statistics and the GUI | op |
 | `banhammer.stats.others` | Can view other players' statistics | op |

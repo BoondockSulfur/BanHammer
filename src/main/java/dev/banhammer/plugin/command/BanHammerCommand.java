@@ -5,8 +5,11 @@ import dev.banhammer.plugin.database.Database;
 import dev.banhammer.plugin.database.model.AppealRecord;
 import dev.banhammer.plugin.database.model.PunishmentRecord;
 import dev.banhammer.plugin.database.model.PunishmentStatistics;
+import dev.banhammer.plugin.manager.PunishmentTarget;
+import dev.banhammer.plugin.util.DurationParser;
 import dev.banhammer.plugin.util.FoliaScheduler;
 import dev.banhammer.plugin.util.ItemFactory;
+import dev.banhammer.plugin.util.ValidationUtil;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
@@ -17,6 +20,7 @@ import org.bukkit.command.TabExecutor;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -53,6 +57,7 @@ public class BanHammerCommand implements TabExecutor {
         GIVE("give", "banhammer.give", true),
         RELOAD("reload", "banhammer.reload", false),
         HISTORY("history", "banhammer.history", true),
+        BAN("ban", "banhammer.ban", true),
         UNBAN("unban", "banhammer.unban", true),
         STATS("stats", "banhammer.stats", true),
         GUI("gui", "banhammer.stats", false),
@@ -114,6 +119,7 @@ public class BanHammerCommand implements TabExecutor {
             case RELOAD -> handleReload(sender);
             case GIVE -> handleGive(sender, args);
             case HISTORY -> handleHistory(sender, args);
+            case BAN -> handleBan(sender, args);
             case UNBAN -> handleUnban(sender, args);
             case STATS -> handleStats(sender, args);
             case APPEALS -> handleAppeals(sender);
@@ -257,6 +263,69 @@ public class BanHammerCommand implements TabExecutor {
                 reply(sender, plugin.messages().historyEntryActive());
             }
         }
+    }
+
+    /**
+     * {@code /bh ban <player> [duration] [reason]} - also for offline players who have been on
+     * this server before. Without a readable duration the ban is permanent and the reason
+     * starts at the second argument.
+     */
+    private void handleBan(CommandSender sender, String[] args) {
+        if (!require(sender, "banhammer.ban")) {
+            return;
+        }
+
+        if (args.length < 2) {
+            reply(sender, prefixed(plugin.messages().banUsage()));
+            return;
+        }
+
+        PunishmentTarget target = plugin.getPunishmentManager().resolveTarget(args[1]);
+        if (target == null) {
+            reply(sender, prefixed(plugin.messages().playerNotFound()));
+            return;
+        }
+
+        Duration duration = null;
+        int reasonStart = 2;
+        if (args.length >= 3) {
+            DurationParser.Result parsed = DurationParser.parse(args[2]);
+            if (!parsed.isInvalid()) {
+                duration = parsed.orNullForPermanent();
+                reasonStart = 3;
+            }
+        }
+
+        String reason = args.length > reasonStart
+                ? String.join(" ", Arrays.copyOfRange(args, reasonStart, args.length))
+                : plugin.messages().defaultBanReason();
+
+        ValidationUtil.ReasonPolicy policy = plugin.settings().reasonPolicy();
+        ValidationUtil.ValidationResult validation = policy.validate(reason);
+        if (!validation.isValid()) {
+            reply(sender, prefixed(plugin.messages().validationError(validation, "Invalid reason")));
+            return;
+        }
+        String finalReason = policy.filter(reason);
+        String durationText = DurationParser.formatDisplay(duration);
+
+        plugin.getPunishmentManager().banPlayer(sender, target, finalReason, duration, false)
+                .thenAccept(result -> {
+                    switch (result.status()) {
+                        case SUCCESS -> {
+                            reply(sender, prefixed(plugin.messages().bannedStaff(target.name(), durationText)));
+                            if (plugin.settings().ban().broadcast()) {
+                                String staffName = sender instanceof Player player ? player.getName() : "Console";
+                                Bukkit.getServer().broadcast(prefixed(
+                                        plugin.messages().bannedBroadcast(staffName, target.name(), durationText)));
+                            }
+                        }
+                        case CANCELLED -> reply(sender, prefixed(plugin.messages().muteCancelled()));
+                        case NOT_PERMITTED -> reply(sender, prefixed(plugin.messages().cannotBan()));
+                        case FAILED -> reply(sender, plugin.messages().errorOccurred());
+                    }
+                })
+                .exceptionally(throwable -> fail(sender, "ban " + target.name(), throwable));
     }
 
     private void handleUnban(CommandSender sender, String[] args) {

@@ -28,12 +28,27 @@ public class PlayerPunishEvent extends Event implements Cancellable {
 
     private final CommandSender staff;
     private final Player victim;
+    private final java.util.UUID victimUuid;
+    private final String victimName;
     private final PunishmentType type;
     private String reason;
     private Duration duration;
 
     public PlayerPunishEvent(CommandSender staff, Player victim, PunishmentType type, String reason, Duration duration) {
+        this(staff, victim.getUniqueId(), victim.getName(), victim, type, reason, duration);
+    }
+
+    /**
+     * Creates the event for a player who may be offline.
+     *
+     * @param victim the online player, or {@code null} if the player is offline
+     * @since 4.2.0
+     */
+    public PlayerPunishEvent(CommandSender staff, java.util.UUID victimUuid, String victimName, Player victim,
+                             PunishmentType type, String reason, Duration duration) {
         this.staff = staff;
+        this.victimUuid = victimUuid;
+        this.victimName = victimName;
         this.victim = victim;
         this.type = type;
         this.reason = reason;
@@ -63,10 +78,38 @@ public class PlayerPunishEvent extends Event implements Cancellable {
     /**
      * Gets the player being punished.
      *
-     * @return the victim player
+     * @return the victim player, or {@code null} if the punishment targets an offline player
+     *         (since 4.2.0; use {@link #getVictimUuid()} and {@link #getVictimName()} instead)
      */
+    @Nullable
     public Player getVictim() {
         return victim;
+    }
+
+    /**
+     * @return the punished player's UUID; always set, also for offline players
+     * @since 4.2.0
+     */
+    @NotNull
+    public java.util.UUID getVictimUuid() {
+        return victimUuid;
+    }
+
+    /**
+     * @return the punished player's last known name
+     * @since 4.2.0
+     */
+    @NotNull
+    public String getVictimName() {
+        return victimName;
+    }
+
+    /**
+     * @return true if the punished player is offline ({@link #getVictim()} is then {@code null})
+     * @since 4.2.0
+     */
+    public boolean isVictimOffline() {
+        return victim == null;
     }
 
     /**

@@ -98,6 +98,12 @@ public final class JailManager {
     /** Players released while offline; the release is carried out on their next join. */
     private final Set<UUID> pendingReleases = ConcurrentHashMap.newKeySet();
 
+    /**
+     * Remaining time (millis) of temporary jails whose player is offline. Jail time only runs
+     * while the player is online: the clock stops on quit and resumes on the next join.
+     */
+    private final Map<UUID, Long> pausedRemaining = new ConcurrentHashMap<>();
+
     private final File storeFile;
 
     /** Serializes file writes so an older snapshot can never overwrite a newer one. */
@@ -196,6 +202,9 @@ public final class JailManager {
             if (entry.isLong("expiry") || entry.isInt("expiry")) {
                 jailExpiry.put(uuid, entry.getLong("expiry"));
             }
+            if (entry.isLong("paused") || entry.isInt("paused")) {
+                pausedRemaining.put(uuid, entry.getLong("paused"));
+            }
             SavedLocation back = SavedLocation.readFrom(entry.getConfigurationSection("return"));
             if (back != null) {
                 returnLocations.put(uuid, back);
@@ -210,6 +219,7 @@ public final class JailManager {
         all.addAll(pendingReleases);
         all.addAll(returnLocations.keySet());
         all.addAll(jailExpiry.keySet());
+        all.addAll(pausedRemaining.keySet());
         for (UUID uuid : all) {
             ConfigurationSection entry = yaml.createSection("players." + uuid);
             if (jailedPlayers.contains(uuid)) {
@@ -221,6 +231,10 @@ public final class JailManager {
             Long expiry = jailExpiry.get(uuid);
             if (expiry != null) {
                 entry.set("expiry", expiry);
+            }
+            Long paused = pausedRemaining.get(uuid);
+            if (paused != null) {
+                entry.set("paused", paused);
             }
             SavedLocation back = returnLocations.get(uuid);
             if (back != null) {
@@ -289,6 +303,7 @@ public final class JailManager {
             return false;
         }
 
+        pausedRemaining.remove(player.getUniqueId());
         boolean timed = duration != null && !duration.isZero() && !duration.isNegative();
         if (timed) {
             // Tracked unconditionally. Making this conditional on the database being reachable
@@ -373,6 +388,47 @@ public final class JailManager {
         return true;
     }
 
+    /**
+     * Jails a player who is offline. The jail is applied on their next join, and a temporary
+     * jail's time only starts running then.
+     */
+    public void jailOffline(UUID uuid, Duration duration) {
+        pendingReleases.remove(uuid);
+        jailedPlayers.add(uuid);
+        jailExpiry.remove(uuid);
+        if (duration != null && !duration.isZero() && !duration.isNegative()) {
+            pausedRemaining.put(uuid, duration.toMillis());
+        } else {
+            pausedRemaining.remove(uuid);
+        }
+        persist();
+    }
+
+    /**
+     * Stops the clock of a temporary jail when the player leaves.
+     */
+    public void pauseOnQuit(UUID uuid) {
+        if (pause(uuid)) {
+            persist();
+        }
+    }
+
+    private boolean pause(UUID uuid) {
+        Long expiry = jailExpiry.remove(uuid);
+        if (expiry == null) {
+            return false;
+        }
+        pausedRemaining.put(uuid, Math.max(1000L, expiry - System.currentTimeMillis()));
+        return true;
+    }
+
+    /**
+     * @return true if the player's temporary jail is on hold because they are offline
+     */
+    public boolean isPaused(UUID uuid) {
+        return pausedRemaining.containsKey(uuid);
+    }
+
     // ==================== Releasing ====================
 
     /**
@@ -400,6 +456,7 @@ public final class JailManager {
 
         SavedLocation returnLoc = returnLocations.remove(uuid);
         jailExpiry.remove(uuid);
+        pausedRemaining.remove(uuid);
         persist();
 
         if (essentialsJailed) {
@@ -410,6 +467,12 @@ public final class JailManager {
                 plugin.getSLF4JLogger().warn("Failed to release {} from Essentials; use Essentials' /unjail",
                         player.getName());
             }
+        }
+
+        if (!tracked && !essentialsJailed && returnLoc == null) {
+            // Jailed and released while offline: the player never stood in the cell, so
+            // there is nothing to undo and nowhere to send them.
+            return;
         }
 
         teleportHome(player, returnLoc);
@@ -458,6 +521,7 @@ public final class JailManager {
     public void releasePlayerByUUID(UUID uuid) {
         jailedPlayers.remove(uuid);
         jailExpiry.remove(uuid);
+        pausedRemaining.remove(uuid);
         pendingReleases.add(uuid);
         removeFromEnforcementCache(uuid);
         persist();
@@ -576,21 +640,15 @@ public final class JailManager {
                 .thenAccept(records -> {
                     Instant now = Instant.now();
                     for (PunishmentRecord record : records) {
-                        if (record.getExpiresAt() != null && !record.getExpiresAt().isAfter(now)) {
-                            continue; // Already expired; the unban scheduler will clean it up.
-                        }
                         Player player = Bukkit.getPlayer(record.getVictimUuid());
                         if (player == null || !player.isOnline()) {
                             continue;
                         }
-                        Duration remaining = record.getExpiresAt() == null
-                                ? null
-                                : Duration.between(now, record.getExpiresAt());
-                        FoliaScheduler.runOnEntity(plugin, player, () -> {
-                            if (player.isOnline()) {
-                                jailPlayer(player, remaining);
-                            }
-                        });
+                        Duration remaining = remainingFor(record.getVictimUuid(), record, now);
+                        if (remaining != null && remaining.isZero()) {
+                            continue; // Already expired; the unban scheduler will clean it up.
+                        }
+                        resume(database, player, record, remaining);
                     }
                 })
                 .exceptionally(throwable -> {
@@ -618,13 +676,14 @@ public final class JailManager {
                 releaseIfPending(player);
                 return;
             }
+            Long paused = pausedRemaining.get(uuid);
             Long expiry = jailExpiry.get(uuid);
-            if (expiry != null && expiry <= System.currentTimeMillis()) {
+            if (paused == null && expiry != null && expiry <= System.currentTimeMillis()) {
                 release(player);
                 return;
             }
             addToEnforcementCache(uuid);
-            reapply(player, remainingFrom(expiry));
+            reapply(player, paused != null ? Duration.ofMillis(paused) : remainingFrom(expiry));
             return;
         }
 
@@ -633,10 +692,16 @@ public final class JailManager {
 
         database.getActivePunishmentsByType(uuid, PunishmentType.JAIL).thenAccept(punishments -> {
             Instant now = Instant.now();
-            PunishmentRecord active = punishments.stream()
-                    .filter(p -> p.getExpiresAt() == null || p.getExpiresAt().isAfter(now))
-                    .findFirst()
-                    .orElse(null);
+            PunishmentRecord active = null;
+            Duration remaining = null;
+            for (PunishmentRecord candidate : punishments) {
+                Duration left = remainingFor(uuid, candidate, now);
+                if (left == null || !left.isZero()) {
+                    active = candidate;
+                    remaining = left;
+                    break;
+                }
+            }
 
             if (active == null) {
                 // The database is authoritative: whatever is left over locally is released.
@@ -649,8 +714,7 @@ public final class JailManager {
             }
 
             addToEnforcementCache(uuid);
-            Duration remaining = active.getExpiresAt() == null ? null : Duration.between(now, active.getExpiresAt());
-            reapply(player, remaining);
+            resume(database, player, active, remaining);
         }).exceptionally(throwable -> {
             plugin.getSLF4JLogger().error("Failed to restore jail status for {}", player.getName(), throwable);
             // Do not leave a player blocked because of a database hiccup.
@@ -659,6 +723,42 @@ public final class JailManager {
             }
             return null;
         });
+    }
+
+    /**
+     * Remaining jail time for an active record, honouring a paused clock.
+     *
+     * @return the remaining time, {@code null} for a permanent jail, or {@link Duration#ZERO}
+     *         if it has already run out
+     */
+    private Duration remainingFor(UUID uuid, PunishmentRecord record, Instant now) {
+        if (record.getExpiresAt() == null) {
+            return null;
+        }
+        Long paused = pausedRemaining.get(uuid);
+        if (paused != null) {
+            return Duration.ofMillis(paused);
+        }
+        Duration left = Duration.between(now, record.getExpiresAt());
+        return left.isNegative() ? Duration.ZERO : left;
+    }
+
+    /**
+     * Re-applies a database jail. The record's expiry is moved to now + remaining first, so
+     * the unban scheduler does not expire it on the old date in the meantime.
+     */
+    private void resume(Database database, Player player, PunishmentRecord record, Duration remaining) {
+        if (remaining == null) {
+            reapply(player, null);
+            return;
+        }
+        database.updateExpiry(record.getId(), Instant.now().plus(remaining))
+                .exceptionally(throwable -> {
+                    plugin.getSLF4JLogger().warn("Could not move the expiry of jail #{}: {}",
+                            record.getId(), throwable.toString());
+                    return false;
+                })
+                .thenRun(() -> reapply(player, remaining));
     }
 
     private void releaseIfPending(Player player) {
@@ -753,6 +853,12 @@ public final class JailManager {
         FoliaScheduler.cancelTask(expiryTask);
         expiryTask = null;
 
+        // Players still online at shutdown stop their clock here; the quit event does not
+        // reach a plugin that is already disabled.
+        for (UUID uuid : Set.copyOf(jailExpiry.keySet())) {
+            pause(uuid);
+        }
+
         // Flush the final state before the maps are cleared.
         String data = snapshot();
         fileWriter.shutdown();
@@ -767,6 +873,7 @@ public final class JailManager {
 
         jailedPlayers.clear();
         pendingReleases.clear();
+        pausedRemaining.clear();
         returnLocations.clear();
         jailExpiry.clear();
         jailListener = null;

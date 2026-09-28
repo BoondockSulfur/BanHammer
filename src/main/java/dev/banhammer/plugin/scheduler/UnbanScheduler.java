@@ -140,6 +140,13 @@ public class UnbanScheduler {
      * @param record the expired punishment record
      */
     private void processExpiredPunishment(PunishmentRecord record) {
+        if (record.getType() == PunishmentType.JAIL
+                && (Bukkit.getPlayer(record.getVictimUuid()) == null
+                    || plugin.getJailManager().isPaused(record.getVictimUuid()))) {
+            // Jail time only runs while the player is online; the expiry is moved forward when
+            // they rejoin.
+            return;
+        }
         database.deactivatePunishment(record.getId(), null, EXPIRY_REASON)
                 .thenAccept(claimed -> {
                     if (!claimed) {

@@ -651,6 +651,15 @@ public final class Messages {
         return msg("historyUsage", "Nutzung: /bh history <Spieler> [Seite]");
     }
 
+    public Component banUsage() {
+        return msg("banUsage", "Nutzung: /bh ban <Spieler> [Dauer] [Grund]");
+    }
+
+    /** Plain text: stored in the ban list and the database. */
+    public String defaultBanReason() {
+        return raw("defaultBanReason", "Gebannt durch das Team");
+    }
+
     public Component unbanUsage() {
         return msg("unbanUsage", "Nutzung: /bh unban <Spieler> [Grund]");
     }

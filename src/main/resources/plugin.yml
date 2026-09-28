@@ -22,7 +22,7 @@ libraries:
 commands:
   banhammer:
     description: Admin ban hammer
-    usage: /banhammer [give|reload|history|unban|stats|gui|appeals|approve|deny]
+    usage: /banhammer [give|reload|history|ban|unban|stats|gui|appeals|approve|deny]
     permission: banhammer.command
     aliases: [bh]
   appeal:
@@ -75,6 +75,9 @@ permissions:
     default: op
   banhammer.history.others:
     description: Can view other players' history
+    default: op
+  banhammer.ban:
+    description: Can ban players with /bh ban, also while they are offline
     default: op
   banhammer.unban:
     description: Can unban players

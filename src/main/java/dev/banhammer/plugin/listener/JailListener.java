@@ -166,5 +166,7 @@ public class JailListener implements Listener {
         // Remove from cache when player quits (to save memory)
         // Player data persists in database, will be re-cached on rejoin if still jailed
         jailedPlayersCache.remove(event.getPlayer().getUniqueId());
+        // Jail time only runs while the player is online.
+        plugin.getJailManager().pauseOnQuit(event.getPlayer().getUniqueId());
     }
 }
