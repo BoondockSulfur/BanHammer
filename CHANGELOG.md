@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [4.2.0] - 2026-09-28
 
+One JAR again for 1.21.x (from 1.21.1) and 26.x, Paper and Folia; requires Java 21.
+
 ### ✨ Added
 
 - `/bh ban <player> [duration] [reason]` (permission `banhammer.ban`).

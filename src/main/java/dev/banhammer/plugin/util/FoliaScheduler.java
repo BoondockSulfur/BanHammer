@@ -82,7 +82,9 @@ public final class FoliaScheduler {
      *         the plugin is being disabled
      */
     public static <T> CompletableFuture<T> callGlobal(Plugin plugin, Supplier<T> task) {
-        if (Bukkit.isGlobalTickThread()) {
+        // Bukkit.isGlobalTickThread() does not exist before 1.21.4; on Folia the task is simply
+        // scheduled, on Paper the main thread is the global thread.
+        if (!folia && Bukkit.isPrimaryThread()) {
             try {
                 return CompletableFuture.completedFuture(task.get());
             } catch (Throwable t) {

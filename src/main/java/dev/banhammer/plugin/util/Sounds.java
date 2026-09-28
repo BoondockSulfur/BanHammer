@@ -12,8 +12,8 @@ import java.util.Locale;
  * <p>Accepts both modern namespaced keys (e.g. {@code "block.note_block.pling"} or
  * {@code "minecraft:block.note_block.pling"}) and legacy enum-style constants
  * (e.g. {@code "BLOCK_NOTE_BLOCK_PLING"}), so existing configs keep working while
- * users can migrate to the registry-based naming. The single remaining call to the
- * deprecated {@code Sound.valueOf(String)} is isolated here.
+ * users can migrate to the registry-based naming. Legacy names are looked up as
+ * constants, which works on every supported version.
  *
  * @since 4.0.0
  */
@@ -71,11 +71,15 @@ public final class Sounds {
         }
     }
 
-    @SuppressWarnings({"deprecation", "removal"})
+    /**
+     * Looks the constant up as a public static field. {@code Sound} is an enum up to 1.21.2
+     * and an interface with constants afterwards; a direct {@code Sound.valueOf} call compiled
+     * against one fails to link against the other, while both expose the same fields.
+     */
     private static Sound legacyValueOf(String name) {
         try {
-            return Sound.valueOf(name);
-        } catch (IllegalArgumentException e) {
+            return Sound.class.getField(name).get(null) instanceof Sound sound ? sound : null;
+        } catch (ReflectiveOperationException e) {
             return null;
         }
     }

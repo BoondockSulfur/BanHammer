@@ -2,9 +2,9 @@
 
 <div align="center">
 
-**The ultimate ban hammer for Paper & Folia 26.1.x servers with extended moderation features**
+**The ultimate ban hammer for Paper & Folia 1.21.x and 26.x servers with extended moderation features**
 
-[![Minecraft Version](https://img.shields.io/badge/Minecraft-26.1.x-brightgreen.svg)](https://papermc.io/)
+[![Minecraft Version](https://img.shields.io/badge/Minecraft-1.21.x%20%7C%2026.x-brightgreen.svg)](https://papermc.io/)
 [![Folia Support](https://img.shields.io/badge/Folia-Supported-blue.svg)](https://papermc.io/software/folia)
 [![Java Version](https://img.shields.io/badge/Java-25-orange.svg)](https://adoptium.net/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -33,10 +33,10 @@
 
 BanHammer is a powerful moderation plugin for Minecraft Paper servers that provides a special "Ban Hammer" item. With this, administrators can ban or kick players in a dramatic and entertaining way - including lightning, particles, and sound effects!
 
-**Version 4.1.0** is a correctness release on top of 4.0: see `CHANGELOG.md` for the full list.
+**Version 4.2.0** runs on 1.21.x and 26.x from a single JAR: see `CHANGELOG.md` for the full list.
 
 **Highlights since 3.x:**
-- ✅ **Paper 26.1.x Support** - Fully modernized for the new Minecraft versioning
+- ✅ **Paper 1.21.x and 26.x Support** - One JAR for both version lines
 - ✅ **Folia Support** - Dual-compatible with Paper and Folia from a single JAR
 - ✅ **Ban Presets System** - Quick switching between predefined ban types
 - ✅ **Kick/Jail Presets System** - Left-click preset cycling for kicks and jails
@@ -448,8 +448,8 @@ pm.getHistory(playerUuid, 50)
 ## 🚀 Installation
 
 1. **Requirements:**
-   - Paper or Folia Server 26.1.x or higher
-   - Java 25 or higher
+   - Paper or Folia Server 1.21.1 or higher (including 26.x)
+   - Java 21 or higher
    - Optional: MySQL Server (for MySQL mode)
    - Optional: Essentials Plugin (for enhanced jail system)
 
@@ -469,8 +469,6 @@ pm.getHistory(playerUuid, 50)
    - [BS-BanHammer Resource Pack](https://modrinth.com/resourcepack/bs-banhammer-resource-pack)
 
 4. **Start server** and adjust `plugins/BanHammer/config.yml`
-
-> **Looking for 1.21.x support?** Use [BanHammer v3.1.1](https://github.com/BoondockSulfur/BanHammer/releases/tag/v3.1.1) instead.
 
 ---
 

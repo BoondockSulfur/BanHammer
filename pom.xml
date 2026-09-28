@@ -11,7 +11,7 @@
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <maven.compiler.release>25</maven.compiler.release>
+    <maven.compiler.release>21</maven.compiler.release>
     <!--
       Pinned to an exact version. An open range like [26.1.2.build,) makes builds
       irreproducible and can silently pull in an API change between two builds of the

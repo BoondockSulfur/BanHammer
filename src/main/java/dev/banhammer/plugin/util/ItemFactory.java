@@ -48,11 +48,10 @@ public final class ItemFactory {
         }
 
         if (s.itemCustomModelData() > 0) {
-            // The data-component form replaces the deprecated integer setter. The float list
-            // is what modern resource packs match on via the "custom_model_data" predicate.
-            var component = meta.getCustomModelDataComponent();
-            component.setFloats(List.of((float) s.itemCustomModelData()));
-            meta.setCustomModelDataComponent(component);
+            // The integer setter exists on every supported version (the data-component form
+            // only from 1.21.4). From 1.21.4 on it fills the component's float list, which is
+            // what resource packs match via the "custom_model_data" predicate.
+            setLegacyCustomModelData(meta, s.itemCustomModelData());
         }
         meta.getPersistentDataContainer().set(plugin.pdcKey(), PersistentDataType.BYTE, HAMMER_PDC_MARKER);
 
@@ -63,6 +62,11 @@ public final class ItemFactory {
 
         item.setItemMeta(meta);
         return item;
+    }
+
+    @SuppressWarnings({"deprecation", "removal"})
+    private static void setLegacyCustomModelData(ItemMeta meta, int value) {
+        meta.setCustomModelData(value);
     }
 
     public static boolean isHammer(BanHammerPlugin plugin, ItemStack item) {
